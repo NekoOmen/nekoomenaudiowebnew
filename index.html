@@ -464,16 +464,16 @@ async function loadFFmpeg() {
     barFill.style.width = '40%';
     const wasmURL = await toBlobURL(baseURL + '/ffmpeg-core.wasm', 'application/wasm');
 
-    status.textContent = 'Fetching worker...';
+    status.textContent = 'Fetching worker class...';
     barFill.style.width = '60%';
-    const workerURL = await toBlobURL(
+    const classWorkerURL = await toBlobURL(
       'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/umd/814.ffmpeg.js',
       'text/javascript'
     );
 
     status.textContent = 'Initializing engine...';
     barFill.style.width = '80%';
-    await ffmpegInstance.load({ coreURL, wasmURL, workerURL });
+    await ffmpegInstance.load({ coreURL, wasmURL, classWorkerURL });
 
     barFill.style.width = '100%';
     status.textContent = 'Ready!';
