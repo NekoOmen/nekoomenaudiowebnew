@@ -116,6 +116,8 @@ body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;bac
 </style>
 </head>
 <body>
+<!-- Enable SharedArrayBuffer on GitHub Pages (adds COOP/COEP headers via service worker) -->
+<script src="https://cdn.jsdelivr.net/npm/coi-serviceworker@0.1.7/coi-serviceworker.min.js"></script>
 <div class="gate-overlay" id="gateOverlay"><div class="gate-box">
   <div class="gate-logo"><div class="logo-icon" style="width:48px;height:48px;border-radius:12px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:grid;place-items:center;font-size:22px;font-weight:800">♫</div><div style="font-family:'JetBrains Mono',monospace;font-weight:700;font-size:20px;letter-spacing:1px">NOMEN<span style="color:var(--accent)">.</span>AUDIO</div></div>
   <div class="gate-title">Support Us to <span class="accent">Continue</span></div>
@@ -170,7 +172,7 @@ function loadFF(){
   document.getElementById('ffmpegLoading').classList.add('show');
   st.textContent='Creating FFmpeg instance...';bar.style.width='10%';
   ff=FFmpeg.createFFmpeg({
-    corePath:'https://cdn.jsdelivr.net/npm/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js',
+    corePath:'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
     log:false
   });
   ff.setProgress(function(p){
