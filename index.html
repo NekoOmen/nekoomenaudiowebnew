@@ -170,7 +170,7 @@ function loadFF(){
   document.getElementById('ffmpegLoading').classList.add('show');
   st.textContent='Creating FFmpeg instance...';bar.style.width='10%';
   ff=FFmpeg.createFFmpeg({
-    corePath:'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
+    corePath:'https://cdn.jsdelivr.net/npm/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js',
     log:false
   });
   ff.setProgress(function(p){
