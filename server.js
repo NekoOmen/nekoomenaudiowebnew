@@ -7,6 +7,7 @@ const { v4: uuidv4 } = require('uuid');
 
 // System FFmpeg installed via apt in Docker container
 ffmpeg.setFfmpegPath('/usr/bin/ffmpeg');
+ffmpeg.setFfprobePath('/usr/bin/ffprobe');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -151,21 +152,53 @@ app.get('/api/download/:filename', (req, res) => {
 });
 
 /**
+ * Probe input file to get actual sample rate
+ */
+function probeAudio(inputPath) {
+  return new Promise((resolve, reject) => {
+    ffmpeg.ffprobe(inputPath, (err, metadata) => {
+      if (err) return reject(err);
+      const audioStream = metadata.streams.find(s => s.codec_type === 'audio');
+      resolve({
+        sampleRate: audioStream ? parseInt(audioStream.sample_rate) || 44100 : 44100,
+        channels: audioStream ? audioStream.channels || 2 : 2
+      });
+    });
+  });
+}
+
+/**
  * Process audio with FFmpeg
  * Independent pitch & speed control:
  * - Speed (tempo) without affecting pitch: atempo filter
  * - Pitch shift without affecting speed: asetrate + aresample
+ * 
+ * FIX: Normalizes input to 44100Hz FIRST, so asetrate math is always correct
+ * regardless of whether input is 44100, 48000, 32000, etc.
  */
-function processAudio(inputPath, outputPath, speed, pitchSemitones, volume, format) {
+async function processAudio(inputPath, outputPath, speed, pitchSemitones, volume, format) {
+  // Probe actual sample rate
+  const info = await probeAudio(inputPath);
+  const inputRate = info.sampleRate;
+  const outputRate = 44100;
+
   return new Promise((resolve, reject) => {
     const filters = [];
 
-    if (pitchSemitones !== 0) {
-      const pitchFactor = Math.pow(2, pitchSemitones / 12);
-      filters.push(`asetrate=44100*${pitchFactor.toFixed(6)}`);
-      filters.push(`aresample=44100`);
+    // STEP 1: Normalize input to 44100Hz so all pitch math is consistent
+    if (inputRate !== outputRate) {
+      filters.push(`aresample=${outputRate}`);
     }
 
+    // STEP 2: Pitch shift (independent of speed)
+    // Now we can safely use 44100 since we normalized above
+    if (pitchSemitones !== 0) {
+      const pitchFactor = Math.pow(2, pitchSemitones / 12);
+      filters.push(`asetrate=${outputRate}*${pitchFactor.toFixed(6)}`);
+      filters.push(`aresample=${outputRate}`);
+    }
+
+    // STEP 3: Speed change (independent of pitch)
     if (speed !== 1.0) {
       let remaining = speed;
       while (remaining > 2.0) {
@@ -179,13 +212,14 @@ function processAudio(inputPath, outputPath, speed, pitchSemitones, volume, form
       filters.push(`atempo=${remaining.toFixed(6)}`);
     }
 
+    // STEP 4: Volume
     if (volume !== 1.0) {
       filters.push(`volume=${volume.toFixed(2)}`);
     }
 
     let cmd = ffmpeg(inputPath)
       .audioChannels(2)
-      .audioFrequency(44100);
+      .audioFrequency(outputRate);
 
     if (filters.length > 0) {
       cmd = cmd.audioFilter(filters);
