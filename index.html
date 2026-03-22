@@ -444,13 +444,29 @@ async function loadFFmpeg() {
     });
 
     status.textContent = 'Downloading FFmpeg WASM core...';
-    barFill.style.width = '20%';
+    barFill.style.width = '10%';
 
+    const { toBlobURL } = FFmpegUtil;
     const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.9/dist/umd';
-    await ffmpegInstance.load({
-      coreURL: baseURL + '/ffmpeg-core.js',
-      wasmURL: baseURL + '/ffmpeg-core.wasm',
-    });
+
+    status.textContent = 'Fetching core JS...';
+    barFill.style.width = '20%';
+    const coreURL = await toBlobURL(baseURL + '/ffmpeg-core.js', 'text/javascript');
+
+    status.textContent = 'Fetching WASM binary...';
+    barFill.style.width = '40%';
+    const wasmURL = await toBlobURL(baseURL + '/ffmpeg-core.wasm', 'application/wasm');
+
+    status.textContent = 'Fetching worker...';
+    barFill.style.width = '60%';
+    const workerURL = await toBlobURL(
+      'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/umd/814.ffmpeg.js',
+      'text/javascript'
+    );
+
+    status.textContent = 'Initializing engine...';
+    barFill.style.width = '80%';
+    await ffmpegInstance.load({ coreURL, wasmURL, workerURL });
 
     barFill.style.width = '100%';
     status.textContent = 'Ready!';
