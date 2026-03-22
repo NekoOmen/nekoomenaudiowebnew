@@ -364,36 +364,28 @@ body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;bac
   </div>
 </div>
 
-<!-- FFmpeg WASM -->
-<script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/umd/ffmpeg.min.js"></script>
-<script>
-// Polyfill toBlobURL since @ffmpeg/util UMD global is unreliable
+<!-- Single script - everything in one module -->
+<script type="module">
+
+// === toBlobURL: fetch remote file as blob URL (bypasses CORS for Workers) ===
 async function toBlobURL(url, mimeType) {
   const resp = await fetch(url);
-  const blob = new Blob([await resp.arrayBuffer()], { type: mimeType });
+  const buf = await resp.arrayBuffer();
+  const blob = new Blob([new Uint8Array(buf)], { type: mimeType });
   return URL.createObjectURL(blob);
 }
-</script>
 
-<script>
 // === GATE LOGIC ===
-(function() {
-  const GATE_KEY = 'nomen_audio_gate_passed';
-  const gateOverlay = document.getElementById('gateOverlay');
-  const mainApp = document.getElementById('mainApp');
-  const gateContinue = document.getElementById('gateContinue');
-  const btnYT = document.getElementById('btnYT');
-  const btnTT = document.getElementById('btnTT');
+const GATE_KEY = 'nomen_audio_gate_passed';
+if (localStorage.getItem(GATE_KEY) === 'true') {
+  document.getElementById('gateOverlay').classList.add('hidden');
+  document.getElementById('mainApp').style.display = '';
+  bootApp();
+} else {
+  let ytClicked = false, ttClicked = false;
   const gateYT = document.getElementById('gateYT');
   const gateTT = document.getElementById('gateTT');
-  let ytClicked = false, ttClicked = false;
-
-  if (localStorage.getItem(GATE_KEY) === 'true') {
-    gateOverlay.classList.add('hidden');
-    mainApp.style.display = '';
-    initApp();
-    return;
-  }
+  const gateContinue = document.getElementById('gateContinue');
 
   function checkUnlock() {
     if (ytClicked && ttClicked) {
@@ -402,169 +394,122 @@ async function toBlobURL(url, mimeType) {
       gateContinue.textContent = '🚀 CONTINUE TO NOMEN AUDIO';
     }
   }
-  btnYT.addEventListener('click', () => { ytClicked = true; gateYT.classList.add('done'); checkUnlock(); });
-  btnTT.addEventListener('click', () => { ttClicked = true; gateTT.classList.add('done'); checkUnlock(); });
+  document.getElementById('btnYT').addEventListener('click', () => { ytClicked = true; gateYT.classList.add('done'); checkUnlock(); });
+  document.getElementById('btnTT').addEventListener('click', () => { ttClicked = true; gateTT.classList.add('done'); checkUnlock(); });
   gateContinue.addEventListener('click', () => {
     if (!ytClicked || !ttClicked) return;
     localStorage.setItem(GATE_KEY, 'true');
-    gateOverlay.style.transition = 'opacity .4s';
-    gateOverlay.style.opacity = '0';
-    setTimeout(() => { gateOverlay.classList.add('hidden'); mainApp.style.display = ''; initApp(); }, 400);
+    document.getElementById('gateOverlay').style.transition = 'opacity .4s';
+    document.getElementById('gateOverlay').style.opacity = '0';
+    setTimeout(() => {
+      document.getElementById('gateOverlay').classList.add('hidden');
+      document.getElementById('mainApp').style.display = '';
+      bootApp();
+    }, 400);
   });
-})();
+}
 
 // === FFMPEG WASM ENGINE ===
-let ffmpegInstance = null;
+let ffmpeg = null;
 let ffmpegReady = false;
 let ffmpegLoading = false;
 
 async function loadFFmpeg() {
   if (ffmpegReady) return;
-  if (ffmpegLoading) {
-    // Wait for existing load
-    while (!ffmpegReady) await new Promise(r => setTimeout(r, 100));
-    return;
-  }
+  if (ffmpegLoading) { while (!ffmpegReady) await new Promise(r => setTimeout(r, 100)); return; }
   ffmpegLoading = true;
 
   const loadingEl = document.getElementById('ffmpegLoading');
   const barFill = document.getElementById('flBarFill');
-  const status = document.getElementById('flStatus');
+  const statusEl = document.getElementById('flStatus');
   loadingEl.classList.add('show');
 
   try {
-    const FFmpeg = FFmpegWASM.FFmpeg;
-    ffmpegInstance = new FFmpeg();
+    // Dynamic ESM import - this works cross-origin
+    statusEl.textContent = 'Loading FFmpeg module...';
+    barFill.style.width = '5%';
+    const FFmpegModule = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/+esm');
+    const { FFmpeg } = FFmpegModule;
 
-    ffmpegInstance.on('log', ({ message }) => {
-      // Parse progress from ffmpeg logs
-      const timeMatch = message.match(/time=(\d+):(\d+):(\d+)/);
-      if (timeMatch) {
-        status.textContent = `Encoding: ${timeMatch[1]}:${timeMatch[2]}:${timeMatch[3]}`;
-      }
+    ffmpeg = new FFmpeg();
+    ffmpeg.on('log', ({ message }) => {
+      const m = message.match(/time=(\d+:\d+:\d+)/);
+      if (m) statusEl.textContent = 'Encoding: ' + m[1];
     });
 
-    ffmpegInstance.on('progress', ({ progress }) => {
-      const pct = Math.round(progress * 100);
-      barFill.style.width = pct + '%';
-      status.textContent = `Loading core... ${pct}%`;
-    });
-
-    status.textContent = 'Downloading FFmpeg WASM core...';
-    barFill.style.width = '10%';
-
-    // toBlobURL defined above as global polyfill
+    // Fetch core files as blob URLs to bypass CORS Worker restrictions
     const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.9/dist/umd';
 
-    status.textContent = 'Fetching core JS...';
-    barFill.style.width = '20%';
+    statusEl.textContent = 'Downloading core (~1MB)...';
+    barFill.style.width = '15%';
     const coreURL = await toBlobURL(baseURL + '/ffmpeg-core.js', 'text/javascript');
 
-    status.textContent = 'Fetching WASM binary...';
-    barFill.style.width = '40%';
+    statusEl.textContent = 'Downloading WASM (~31MB)...';
+    barFill.style.width = '30%';
     const wasmURL = await toBlobURL(baseURL + '/ffmpeg-core.wasm', 'application/wasm');
 
-    status.textContent = 'Fetching worker class...';
-    barFill.style.width = '60%';
-    const classWorkerURL = await toBlobURL(
-      'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/umd/814.ffmpeg.js',
-      'text/javascript'
-    );
-
-    status.textContent = 'Initializing engine...';
-    barFill.style.width = '80%';
-    await ffmpegInstance.load({ coreURL, wasmURL, classWorkerURL });
+    statusEl.textContent = 'Initializing FFmpeg engine...';
+    barFill.style.width = '85%';
+    await ffmpeg.load({ coreURL, wasmURL });
 
     barFill.style.width = '100%';
-    status.textContent = 'Ready!';
+    statusEl.textContent = 'Ready!';
     ffmpegReady = true;
 
     const badge = document.getElementById('serverBadge');
-    if (badge) { badge.textContent = '⚡ FFmpeg WASM Ready'; }
-
+    if (badge) badge.textContent = '⚡ FFmpeg WASM Ready';
     setTimeout(() => loadingEl.classList.remove('show'), 500);
   } catch (err) {
     console.error('FFmpeg load error:', err);
-    status.textContent = 'Error: ' + err.message;
-    barFill.style.width = '0%';
+    statusEl.textContent = 'Error: ' + (err.message || String(err));
     barFill.style.background = 'var(--danger)';
-
     const badge = document.getElementById('serverBadge');
-    if (badge) {
-      badge.textContent = '⚠ FFmpeg Failed';
-      badge.style.color = 'var(--danger)';
-      badge.style.borderColor = 'rgba(255,82,82,.3)';
-    }
+    if (badge) { badge.textContent = '⚠ FFmpeg Failed'; badge.style.color = 'var(--danger)'; }
+    ffmpegLoading = false;
     throw err;
   }
 }
 
-/**
- * Process audio with FFmpeg WASM
- * Same logic as server: atempo for speed, asetrate+aresample for pitch
- */
 async function processAudioWasm(fileBytes, fileName, speed, pitchSemitones, vol, format) {
   if (!ffmpegReady) throw new Error('FFmpeg not loaded');
+  const ts = Date.now();
+  const safeName = fileName.replace(/[^a-zA-Z0-9.]/g, '_');
+  const inputName = 'in_' + ts + '_' + safeName;
+  const outputName = 'out_' + ts + '.' + format;
 
-  const inputName = 'input_' + Date.now() + '_' + fileName.replace(/[^a-zA-Z0-9.]/g, '_');
-  const outputName = 'output_' + Date.now() + '.' + format;
+  await ffmpeg.writeFile(inputName, fileBytes);
 
-  // Write input
-  await ffmpegInstance.writeFile(inputName, fileBytes);
-
-  // Build filter chain — same as server.js
+  // Build filter chain — identical to server.js
   const filters = [];
-
-  // PITCH SHIFT (independent of speed)
   if (pitchSemitones !== 0) {
-    const pitchFactor = Math.pow(2, pitchSemitones / 12);
-    filters.push('asetrate=44100*' + pitchFactor.toFixed(6));
+    const factor = Math.pow(2, pitchSemitones / 12);
+    filters.push('asetrate=44100*' + factor.toFixed(6));
     filters.push('aresample=44100');
   }
-
-  // SPEED CHANGE (independent of pitch) — atempo 0.5–2.0 chaining
   if (speed !== 1.0) {
-    let remaining = speed;
-    while (remaining > 2.0) { filters.push('atempo=2.0'); remaining /= 2.0; }
-    while (remaining < 0.5) { filters.push('atempo=0.5'); remaining /= 0.5; }
-    filters.push('atempo=' + remaining.toFixed(6));
+    let rem = speed;
+    while (rem > 2.0) { filters.push('atempo=2.0'); rem /= 2.0; }
+    while (rem < 0.5) { filters.push('atempo=0.5'); rem /= 0.5; }
+    filters.push('atempo=' + rem.toFixed(6));
   }
+  if (vol !== 1.0) filters.push('volume=' + vol.toFixed(2));
 
-  // VOLUME
-  if (vol !== 1.0) {
-    filters.push('volume=' + vol.toFixed(2));
-  }
-
-  // Build args
   const args = ['-i', inputName, '-ac', '2', '-ar', '44100'];
-  if (filters.length > 0) {
-    args.push('-af', filters.join(','));
-  }
-
-  switch (format) {
-    case 'mp3': args.push('-c:a', 'libmp3lame', '-b:a', '192k'); break;
-    case 'ogg': args.push('-c:a', 'libvorbis', '-b:a', '192k'); break;
-    case 'wav': args.push('-c:a', 'pcm_s16le'); break;
-  }
-
+  if (filters.length) args.push('-af', filters.join(','));
+  if (format === 'mp3') args.push('-c:a', 'libmp3lame', '-b:a', '192k');
+  else if (format === 'ogg') args.push('-c:a', 'libvorbis', '-b:a', '192k');
+  else if (format === 'wav') args.push('-c:a', 'pcm_s16le');
   args.push('-y', outputName);
 
-  // Execute
-  await ffmpegInstance.exec(args);
-
-  // Read output
-  const data = await ffmpegInstance.readFile(outputName);
-
-  // Cleanup virtual FS
-  try { await ffmpegInstance.deleteFile(inputName); } catch(e) {}
-  try { await ffmpegInstance.deleteFile(outputName); } catch(e) {}
-
+  await ffmpeg.exec(args);
+  const data = await ffmpeg.readFile(outputName);
+  try { await ffmpeg.deleteFile(inputName); } catch(e) {}
+  try { await ffmpeg.deleteFile(outputName); } catch(e) {}
   return data;
 }
 
 // === MAIN APP ===
-function initApp() {
-  // Start loading FFmpeg in background
+function bootApp() {
   loadFFmpeg().catch(e => console.error('FFmpeg bg load fail:', e));
 
   let files = [], activeIdx = 0;
@@ -576,11 +521,11 @@ function initApp() {
   let exportFormat = 'mp3';
 
   const autoModes = [
-    { id: 'autobypass', label: '⚡ AUTO BYPASS', desc: 'Recommended · One click', speed: 2.0, pitch: 1, featured: true },
+    { id: 'autobypass', label: '⚡ AUTO BYPASS', desc: 'Recommended', speed: 2.0, pitch: 1, featured: true },
     { id: 'speed2x', label: '2x Speed', desc: 'Speed only', speed: 2.0, pitch: 0 },
     { id: 'speed15x', label: '1.5x Speed', desc: 'Moderate', speed: 1.5, pitch: 0 },
     { id: 'pitch3', label: 'Pitch +3st', desc: 'Pitch only', speed: 1.0, pitch: 3 },
-    { id: 'combo', label: '1.5x +2st', desc: 'Speed + pitch', speed: 1.5, pitch: 2 },
+    { id: 'combo', label: '1.5x +2st', desc: 'Combo', speed: 1.5, pitch: 2 },
   ];
   const presets = [
     { label: 'Nightcore', speed: 1.25, pitch: 3 },
@@ -604,43 +549,33 @@ function initApp() {
   const waveFileName = $('waveFileName'), waveTime = $('waveTime');
   const btnPlay = $('btnPlay'), btnRew = $('btnRew'), btnStop = $('btnStop');
   const btnExport = $('btnExport'), btnExportAll = $('btnExportAll');
-  const exportInfo = $('exportInfo'), infoStrip = $('infoStrip');
+  const exportInfo = $('exportInfo');
   const autoIndicator = $('autoIndicator');
   const progressOverlay = $('progressOverlay');
 
   function getCtx() { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); return audioCtx; }
-  function fmtTime(s) { if (!isFinite(s) || s < 0) s = 0; return Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0'); }
-  function fmtSize(b) { return b < 1048576 ? (b / 1024).toFixed(1) + ' KB' : (b / 1048576).toFixed(1) + ' MB'; }
-  function previewRate() { return speed * Math.pow(2, pitch / 12); }
+  function fmtTime(s) { if (!isFinite(s) || s < 0) s = 0; return Math.floor(s/60) + ':' + String(Math.floor(s%60)).padStart(2,'0'); }
+  function fmtSize(b) { return b < 1048576 ? (b/1024).toFixed(1)+' KB' : (b/1048576).toFixed(1)+' MB'; }
+  function previewRate() { return speed * Math.pow(2, pitch/12); }
 
-  function showProgress(title, sub) {
-    $('progTitle').textContent = title;
-    $('progSub').textContent = sub;
-    $('progBarFill').style.width = '0%';
-    $('progStatus').textContent = 'Starting...';
-    progressOverlay.classList.add('show');
-  }
-  function updateProgress(pct, status) {
-    $('progBarFill').style.width = pct + '%';
-    $('progStatus').textContent = status;
-  }
+  function showProgress(title, sub) { $('progTitle').textContent=title; $('progSub').textContent=sub; $('progBarFill').style.width='0%'; $('progStatus').textContent='Starting...'; progressOverlay.classList.add('show'); }
+  function updateProgress(pct, st) { $('progBarFill').style.width=pct+'%'; $('progStatus').textContent=st; }
   function hideProgress() { progressOverlay.classList.remove('show'); }
 
-  // === File loading ===
   async function loadFile(file) {
     const ctx = getCtx();
     const buf = await file.arrayBuffer();
-    const ab = await ctx.decodeAudioData(buf.slice(0)); // slice to avoid detached buffer
-    return { name: file.name, size: file.size, file: file, arrayBuffer: buf, audioBuffer: ab, duration: ab.duration };
+    const ab = await ctx.decodeAudioData(buf.slice(0));
+    return { name: file.name, size: file.size, file, arrayBuffer: buf, audioBuffer: ab, duration: ab.duration };
   }
 
   async function addFiles(fileList) {
     const valid = Array.from(fileList).filter(f => f.type.startsWith('audio/') || /\.(mp3|wav|ogg|flac|m4a|aac|webm)$/i.test(f.name));
-    for (const f of valid) { try { files.push(await loadFile(f)); } catch (e) { console.error('Load fail:', f.name, e); } }
+    for (const f of valid) { try { files.push(await loadFile(f)); } catch(e) { console.error('Load fail:', f.name, e); } }
     if (files.length) {
-      hero.style.display = 'none'; features.style.display = 'none'; editor.style.display = 'block';
+      hero.style.display='none'; features.style.display='none'; editor.style.display='block';
       dropzone.classList.remove('empty'); dropzone.classList.add('has-files');
-      dropzone.innerHTML = '<div class="sub">+ Drop more files or click to add</div>';
+      dropzone.innerHTML='<div class="sub">+ Drop more files or click to add</div>';
     }
     renderTabs(); selectFile(activeIdx); updateFileCount();
   }
@@ -656,8 +591,7 @@ function initApp() {
     files.forEach((f, i) => {
       const t = document.createElement('div');
       t.className = 'file-tab' + (i === activeIdx ? ' active' : '');
-      t.style.animationDelay = (i * 40) + 'ms';
-      t.innerHTML = `<span style="color:${i === activeIdx ? 'var(--accent)' : 'var(--dim)'}">♫</span><span class="fname">${f.name}</span><span class="fdur">${fmtTime(f.duration)}</span><button class="fclose">×</button>`;
+      t.innerHTML = `<span style="color:${i===activeIdx?'var(--accent)':'var(--dim)'}">♫</span><span class="fname">${f.name}</span><span class="fdur">${fmtTime(f.duration)}</span><button class="fclose">×</button>`;
       t.addEventListener('click', e => { if (!e.target.classList.contains('fclose')) { stopPlayback(); selectFile(i); } });
       t.querySelector('.fclose').addEventListener('click', e => { e.stopPropagation(); removeFile(i); });
       fileTabs.appendChild(t);
@@ -668,11 +602,11 @@ function initApp() {
     if (idx === activeIdx && isPlaying) stopPlayback();
     files.splice(idx, 1);
     if (!files.length) {
-      editor.style.display = 'none'; hero.style.display = ''; features.style.display = '';
+      editor.style.display='none'; hero.style.display=''; features.style.display='';
       dropzone.classList.add('empty'); dropzone.classList.remove('has-files');
-      dropzone.innerHTML = '<div class="icon">🎵</div><div class="title">Drop audio files here</div><div class="sub">MP3, WAV, OGG, FLAC, M4A — up to 50MB per file</div>';
+      dropzone.innerHTML='<div class="icon">🎵</div><div class="title">Drop audio files here</div><div class="sub">MP3, WAV, OGG, FLAC, M4A — up to 50MB per file</div>';
     }
-    if (activeIdx >= files.length) activeIdx = Math.max(0, files.length - 1);
+    if (activeIdx >= files.length) activeIdx = Math.max(0, files.length-1);
     renderTabs(); if (files.length) selectFile(activeIdx); updateFileCount();
   }
 
@@ -684,321 +618,267 @@ function initApp() {
     drawWaveform(); updateStats(); updateExportInfo();
   }
 
-  // === Waveform ===
   function drawWaveform() {
     const f = files[activeIdx];
     const dpr = window.devicePixelRatio || 1;
     const rect = waveCanvas.getBoundingClientRect();
-    waveCanvas.width = rect.width * dpr; waveCanvas.height = rect.height * dpr;
+    waveCanvas.width = rect.width*dpr; waveCanvas.height = rect.height*dpr;
     wCtx.scale(dpr, dpr);
     const W = rect.width, H = rect.height;
-    wCtx.clearRect(0, 0, W, H);
-    wCtx.fillStyle = '#161624'; wCtx.fillRect(0, 0, W, H);
+    wCtx.clearRect(0,0,W,H); wCtx.fillStyle='#161624'; wCtx.fillRect(0,0,W,H);
     if (!f) return;
     const data = f.audioBuffer.getChannelData(0);
-    const step = Math.ceil(data.length / W);
-    for (let i = 0; i < W; i++) {
-      let mn = 1, mx = -1;
-      for (let j = 0; j < step; j++) { const v = data[i * step + j] || 0; if (v < mn) mn = v; if (v > mx) mx = v; }
-      const top = (1 + mn) * H / 2, bot = (1 + mx) * H / 2, bH = Math.max(bot - top, 1);
-      const played = playbackPos > 0 && (i / W) < playbackPos;
-      const g = wCtx.createLinearGradient(i, top, i, top + bH);
-      if (played) { g.addColorStop(0, '#00e5ff'); g.addColorStop(1, '#9c6cff'); }
-      else { g.addColorStop(0, '#3a3a52'); g.addColorStop(1, '#252540'); }
-      wCtx.fillStyle = g; wCtx.fillRect(i, top, 2, bH);
+    const step = Math.ceil(data.length/W);
+    for (let i=0; i<W; i++) {
+      let mn=1, mx=-1;
+      for (let j=0; j<step; j++) { const v=data[i*step+j]||0; if(v<mn) mn=v; if(v>mx) mx=v; }
+      const top=(1+mn)*H/2, bot=(1+mx)*H/2, bH=Math.max(bot-top,1);
+      const played = playbackPos>0 && (i/W)<playbackPos;
+      const g = wCtx.createLinearGradient(i,top,i,top+bH);
+      if (played) { g.addColorStop(0,'#00e5ff'); g.addColorStop(1,'#9c6cff'); }
+      else { g.addColorStop(0,'#3a3a52'); g.addColorStop(1,'#252540'); }
+      wCtx.fillStyle=g; wCtx.fillRect(i,top,2,bH);
     }
-    if (playbackPos > 0 && playbackPos < 1) {
-      const x = playbackPos * W;
-      wCtx.strokeStyle = '#fff'; wCtx.lineWidth = 2;
-      wCtx.shadowColor = '#00e5ff'; wCtx.shadowBlur = 8;
-      wCtx.beginPath(); wCtx.moveTo(x, 0); wCtx.lineTo(x, H); wCtx.stroke();
-      wCtx.shadowBlur = 0;
+    if (playbackPos>0 && playbackPos<1) {
+      const x=playbackPos*W;
+      wCtx.strokeStyle='#fff'; wCtx.lineWidth=2; wCtx.shadowColor='#00e5ff'; wCtx.shadowBlur=8;
+      wCtx.beginPath(); wCtx.moveTo(x,0); wCtx.lineTo(x,H); wCtx.stroke(); wCtx.shadowBlur=0;
     }
-    waveTime.textContent = fmtTime(f.duration * playbackPos) + ' / ' + fmtTime(f.duration) + ' · ' + fmtSize(f.size);
+    waveTime.textContent = fmtTime(f.duration*playbackPos)+' / '+fmtTime(f.duration)+' · '+fmtSize(f.size);
   }
 
   waveCanvas.addEventListener('click', e => {
     const f = files[activeIdx]; if (!f) return;
     const rect = waveCanvas.getBoundingClientRect();
-    pauseOffset = ((e.clientX - rect.left) / rect.width) * f.audioBuffer.duration;
-    playbackPos = pauseOffset / f.audioBuffer.duration;
+    pauseOffset = ((e.clientX-rect.left)/rect.width)*f.audioBuffer.duration;
+    playbackPos = pauseOffset/f.audioBuffer.duration;
     drawWaveform();
     if (isPlaying) { stopSilent(); startPlayback(); }
   });
 
-  // === Playback ===
   function startPlayback() {
     const f = files[activeIdx]; if (!f) return;
-    const ctx = getCtx(); if (ctx.state === 'suspended') ctx.resume();
+    const ctx = getCtx(); if (ctx.state==='suspended') ctx.resume();
     const src = ctx.createBufferSource();
     src.buffer = f.audioBuffer; src.playbackRate.value = previewRate();
     const gain = ctx.createGain(); gain.gain.value = volume; gainNode = gain;
     src.connect(gain); gain.connect(ctx.destination);
-    src.start(0, pauseOffset || 0);
-    startTime = ctx.currentTime - (pauseOffset || 0) / previewRate();
+    src.start(0, pauseOffset||0);
+    startTime = ctx.currentTime-(pauseOffset||0)/previewRate();
     sourceNode = src; isPlaying = true; btnPlay.textContent = '⏸';
     function tick() {
       if (!isPlaying) return;
-      const elapsed = (ctx.currentTime - startTime) * previewRate();
-      const pos = elapsed / f.audioBuffer.duration;
-      if (pos >= 1) { stopPlayback(); playbackPos = 0; pauseOffset = 0; drawWaveform(); return; }
-      playbackPos = pos; drawWaveform(); raf = requestAnimationFrame(tick);
+      const elapsed = (ctx.currentTime-startTime)*previewRate();
+      const pos = elapsed/f.audioBuffer.duration;
+      if (pos>=1) { stopPlayback(); playbackPos=0; pauseOffset=0; drawWaveform(); return; }
+      playbackPos=pos; drawWaveform(); raf=requestAnimationFrame(tick);
     }
     raf = requestAnimationFrame(tick);
-    src.onended = () => { if (sourceNode === src) { stopPlayback(); playbackPos = 0; pauseOffset = 0; drawWaveform(); } };
+    src.onended = () => { if (sourceNode===src) { stopPlayback(); playbackPos=0; pauseOffset=0; drawWaveform(); } };
   }
 
-  function stopSilent() { if (sourceNode) { try { sourceNode.stop(); } catch (e) {} sourceNode.disconnect(); sourceNode = null; } if (raf) cancelAnimationFrame(raf); isPlaying = false; }
-  function stopPlayback() { stopSilent(); btnPlay.textContent = '▶'; }
-
-  function togglePlay() {
-    if (isPlaying) { pauseOffset = (getCtx().currentTime - startTime) * previewRate(); stopPlayback(); }
-    else startPlayback();
-  }
+  function stopSilent() { if (sourceNode) { try{sourceNode.stop();}catch(e){} sourceNode.disconnect(); sourceNode=null; } if(raf) cancelAnimationFrame(raf); isPlaying=false; }
+  function stopPlayback() { stopSilent(); btnPlay.textContent='▶'; }
+  function togglePlay() { if (isPlaying) { pauseOffset=(getCtx().currentTime-startTime)*previewRate(); stopPlayback(); } else startPlayback(); }
 
   function applyLive() {
     if (sourceNode) {
-      const ctx = getCtx();
-      const curOff = (ctx.currentTime - startTime) * sourceNode.playbackRate.value;
-      const nr = previewRate();
-      sourceNode.playbackRate.value = nr;
-      startTime = ctx.currentTime - curOff / nr;
+      const ctx=getCtx();
+      const curOff=(ctx.currentTime-startTime)*sourceNode.playbackRate.value;
+      const nr=previewRate();
+      sourceNode.playbackRate.value=nr;
+      startTime=ctx.currentTime-curOff/nr;
     }
-    if (gainNode) gainNode.gain.value = volume;
+    if (gainNode) gainNode.gain.value=volume;
     updateStats(); updateExportInfo(); highlightPreset(); highlightAuto();
   }
 
-  // === UI Sync ===
   function updateKnob(id, pct, color) {
-    const ring = $(id);
-    ring.style.background = `conic-gradient(from -135deg, ${color} 0deg, ${color} ${pct / 100 * 270}deg, #252538 ${pct / 100 * 270}deg, #252538 270deg, transparent 270deg)`;
-    const needle = ring.querySelector('.knob-needle');
-    needle.style.transform = `rotate(${-135 + pct / 100 * 270}deg)`;
-    needle.style.background = color; needle.style.boxShadow = `0 0 6px ${color}`;
+    const ring=$(id);
+    ring.style.background=`conic-gradient(from -135deg, ${color} 0deg, ${color} ${pct/100*270}deg, #252538 ${pct/100*270}deg, #252538 270deg, transparent 270deg)`;
+    const needle=ring.querySelector('.knob-needle');
+    needle.style.transform=`rotate(${-135+pct/100*270}deg)`;
+    needle.style.background=color; needle.style.boxShadow=`0 0 6px ${color}`;
   }
 
   function syncUI() {
-    const sPct = ((speed - 0.25) / 3.75) * 100;
-    $('sliderSpeed').value = speed; $('sliderSpeedVal').textContent = speed.toFixed(2) + 'x';
-    $('sliderSpeedFill').style.width = sPct + '%';
-    $('knobSpeedVal').textContent = speed.toFixed(2) + 'x'; updateKnob('knobSpeed', sPct, '#00e5ff');
-    const pPct = ((pitch + 12) / 24) * 100;
-    $('sliderPitch').value = pitch; $('sliderPitchVal').textContent = pitch + ' st';
-    $('sliderPitchFill').style.width = pPct + '%';
-    $('knobPitchVal').textContent = (pitch > 0 ? '+' : '') + pitch + 'st'; updateKnob('knobPitch', pPct, '#9c6cff');
-    const vPct = (volume / 2) * 100;
-    $('sliderVolume').value = volume; $('sliderVolumeVal').textContent = Math.round(volume * 100) + '%';
-    $('sliderVolumeFill').style.width = vPct + '%';
-    $('knobVolumeVal').textContent = Math.round(volume * 100) + '%'; updateKnob('knobVolume', vPct, '#00e676');
+    const sPct=((speed-0.25)/3.75)*100;
+    $('sliderSpeed').value=speed; $('sliderSpeedVal').textContent=speed.toFixed(2)+'x';
+    $('sliderSpeedFill').style.width=sPct+'%';
+    $('knobSpeedVal').textContent=speed.toFixed(2)+'x'; updateKnob('knobSpeed',sPct,'#00e5ff');
+    const pPct=((pitch+12)/24)*100;
+    $('sliderPitch').value=pitch; $('sliderPitchVal').textContent=pitch+' st';
+    $('sliderPitchFill').style.width=pPct+'%';
+    $('knobPitchVal').textContent=(pitch>0?'+':'')+pitch+'st'; updateKnob('knobPitch',pPct,'#9c6cff');
+    const vPct=(volume/2)*100;
+    $('sliderVolume').value=volume; $('sliderVolumeVal').textContent=Math.round(volume*100)+'%';
+    $('sliderVolumeFill').style.width=vPct+'%';
+    $('knobVolumeVal').textContent=Math.round(volume*100)+'%'; updateKnob('knobVolume',vPct,'#00e676');
     applyLive();
   }
 
   function updateStats() {
-    const f = files[activeIdx]; if (!f) return;
-    $('statRate').textContent = '44100Hz';
-    $('statCh').textContent = 'Stereo';
-    $('statOrig').textContent = fmtTime(f.duration);
-    $('statProc').textContent = fmtTime(f.duration / speed);
+    const f=files[activeIdx]; if(!f) return;
+    $('statRate').textContent='44100Hz'; $('statCh').textContent='Stereo';
+    $('statOrig').textContent=fmtTime(f.duration); $('statProc').textContent=fmtTime(f.duration/speed);
   }
   function updateExportInfo() {
-    const f = files[activeIdx]; if (!f) return;
-    const fmtInfo = { mp3: 'MP3 192kbps', ogg: 'OGG Vorbis', wav: 'WAV 16bit' };
-    exportInfo.innerHTML = `Output: ${fmtInfo[exportFormat]} · 44100Hz · Stereo<br>Speed: ${speed.toFixed(2)}x (atempo) · Pitch: ${pitch > 0 ? '+' : ''}${pitch}st (asetrate) · Independent processing`;
+    const fmtInfo={mp3:'MP3 192kbps',ogg:'OGG Vorbis',wav:'WAV 16bit'};
+    exportInfo.innerHTML=`Output: ${fmtInfo[exportFormat]} · 44100Hz · Stereo<br>Speed: ${speed.toFixed(2)}x (atempo) · Pitch: ${pitch>0?'+':''}${pitch}st (asetrate)`;
   }
   function updateExportBtns() {
-    const ext = exportFormat.toUpperCase();
-    btnExport.textContent = `EXPORT CURRENT → ${ext}`;
-    if (files.length > 1) btnExportAll.textContent = `EXPORT ALL ${files.length} FILES → ${ext}`;
+    const ext=exportFormat.toUpperCase();
+    btnExport.textContent=`EXPORT CURRENT → ${ext}`;
+    if (files.length>1) btnExportAll.textContent=`EXPORT ALL ${files.length} FILES → ${ext}`;
   }
 
-  // === Sliders ===
-  $('sliderSpeed').addEventListener('input', e => { speed = parseFloat(e.target.value); activeAutoMode = null; syncUI(); });
-  $('sliderPitch').addEventListener('input', e => { pitch = parseInt(e.target.value); activeAutoMode = null; syncUI(); });
-  $('sliderVolume').addEventListener('input', e => { volume = parseFloat(e.target.value); syncUI(); });
+  $('sliderSpeed').addEventListener('input', e => { speed=parseFloat(e.target.value); activeAutoMode=null; syncUI(); });
+  $('sliderPitch').addEventListener('input', e => { pitch=parseInt(e.target.value); activeAutoMode=null; syncUI(); });
+  $('sliderVolume').addEventListener('input', e => { volume=parseFloat(e.target.value); syncUI(); });
 
-  // === Knobs ===
   function setupKnob(knobId, param, min, max, stepSize) {
-    const el = $(knobId); let dragging = false, sy = 0, sv = 0;
-    el.addEventListener('pointerdown', e => { dragging = true; sy = e.clientY; sv = param === 'speed' ? speed : param === 'pitch' ? pitch : volume; el.setPointerCapture(e.pointerId); });
+    const el=$(knobId); let dragging=false, sy=0, sv=0;
+    el.addEventListener('pointerdown', e => { dragging=true; sy=e.clientY; sv=param==='speed'?speed:param==='pitch'?pitch:volume; el.setPointerCapture(e.pointerId); });
     el.addEventListener('pointermove', e => {
       if (!dragging) return;
-      let nv = sv + ((sy - e.clientY) / 150) * (max - min);
-      nv = Math.round(nv / stepSize) * stepSize; nv = Math.max(min, Math.min(max, nv));
-      if (param === 'speed') { speed = nv; activeAutoMode = null; }
-      else if (param === 'pitch') { pitch = nv; activeAutoMode = null; }
-      else volume = nv;
+      let nv=sv+((sy-e.clientY)/150)*(max-min);
+      nv=Math.round(nv/stepSize)*stepSize; nv=Math.max(min,Math.min(max,nv));
+      if (param==='speed'){speed=nv;activeAutoMode=null;} else if(param==='pitch'){pitch=nv;activeAutoMode=null;} else volume=nv;
       syncUI();
     });
-    el.addEventListener('pointerup', () => dragging = false);
-    el.addEventListener('pointercancel', () => dragging = false);
+    el.addEventListener('pointerup', ()=>dragging=false);
+    el.addEventListener('pointercancel', ()=>dragging=false);
   }
-  setupKnob('knobSpeed', 'speed', 0.25, 4.0, 0.05);
-  setupKnob('knobPitch', 'pitch', -12, 12, 1);
-  setupKnob('knobVolume', 'volume', 0, 2.0, 0.05);
+  setupKnob('knobSpeed','speed',0.25,4.0,0.05);
+  setupKnob('knobPitch','pitch',-12,12,1);
+  setupKnob('knobVolume','volume',0,2.0,0.05);
 
-  // === Auto Bypass ===
-  (function () {
-    const c = $('autoModes');
+  // Auto Bypass
+  (function(){
+    const c=$('autoModes');
     autoModes.forEach(m => {
-      const b = document.createElement('button'); b.className = 'auto-btn' + (m.featured ? ' auto-featured' : ''); b.dataset.id = m.id;
-      b.innerHTML = `${m.label}<div class="detail">${m.desc}</div>`;
+      const b=document.createElement('button'); b.className='auto-btn'+(m.featured?' auto-featured':''); b.dataset.id=m.id;
+      b.innerHTML=`${m.label}<div class="detail">${m.desc}</div>`;
       b.addEventListener('click', () => {
-        if (activeAutoMode === m.id) { activeAutoMode = null; speed = 1.0; pitch = 0; }
-        else { activeAutoMode = m.id; speed = m.speed; pitch = m.pitch; }
+        if (activeAutoMode===m.id){activeAutoMode=null;speed=1.0;pitch=0;} else{activeAutoMode=m.id;speed=m.speed;pitch=m.pitch;}
         syncUI();
       });
       c.appendChild(b);
     });
   })();
   function highlightAuto() {
-    document.querySelectorAll('.auto-btn').forEach(b => b.classList.toggle('active', b.dataset.id === activeAutoMode));
-    const on = activeAutoMode !== null;
-    autoIndicator.style.display = on ? 'block' : 'none';
-    const s = $('autoSection');
-    s.classList.toggle('auto-active-glow', on);
-    s.style.borderColor = on ? 'rgba(255,171,64,.3)' : '';
-    s.style.background = on ? 'rgba(255,171,64,.04)' : '';
+    document.querySelectorAll('.auto-btn').forEach(b=>b.classList.toggle('active',b.dataset.id===activeAutoMode));
+    const on=activeAutoMode!==null;
+    autoIndicator.style.display=on?'block':'none';
+    const s=$('autoSection'); s.classList.toggle('auto-active-glow',on);
+    s.style.borderColor=on?'rgba(255,171,64,.3)':''; s.style.background=on?'rgba(255,171,64,.04)':'';
   }
 
-  // === Presets ===
-  (function () {
-    presets.forEach(p => {
-      const b = document.createElement('button'); b.className = 'preset-btn';
-      b.dataset.speed = p.speed; b.dataset.pitch = p.pitch;
-      b.innerHTML = `${p.label}<div class="preset-detail">${p.speed}x / ${p.pitch > 0 ? '+' : ''}${p.pitch}st</div>`;
-      b.addEventListener('click', () => { speed = p.speed; pitch = p.pitch; activeAutoMode = null; syncUI(); });
-      $('presetsGrid').appendChild(b);
-    });
-  })();
+  // Presets
+  presets.forEach(p => {
+    const b=document.createElement('button'); b.className='preset-btn';
+    b.dataset.speed=p.speed; b.dataset.pitch=p.pitch;
+    b.innerHTML=`${p.label}<div class="preset-detail">${p.speed}x / ${p.pitch>0?'+':''}${p.pitch}st</div>`;
+    b.addEventListener('click', ()=>{speed=p.speed;pitch=p.pitch;activeAutoMode=null;syncUI();});
+    $('presetsGrid').appendChild(b);
+  });
   function highlightPreset() {
-    document.querySelectorAll('.preset-btn').forEach(b => b.classList.toggle('active', Math.abs(speed - parseFloat(b.dataset.speed)) < 0.01 && pitch === parseInt(b.dataset.pitch)));
+    document.querySelectorAll('.preset-btn').forEach(b=>b.classList.toggle('active',Math.abs(speed-parseFloat(b.dataset.speed))<0.01&&pitch===parseInt(b.dataset.pitch)));
   }
 
-  // === Format ===
-  (function () {
-    const c = $('formatSelector');
+  // Format
+  (function(){
+    const c=$('formatSelector');
     formats.forEach(f => {
-      const b = document.createElement('button');
-      b.className = 'format-btn' + (f.id === exportFormat ? ' active' : '');
-      b.dataset.fmt = f.id;
-      b.innerHTML = `${f.label}<div class="fmt-sub">${f.sub}</div>`;
-      b.addEventListener('click', () => {
-        exportFormat = f.id;
-        document.querySelectorAll('.format-btn').forEach(x => x.classList.toggle('active', x.dataset.fmt === f.id));
+      const b=document.createElement('button');
+      b.className='format-btn'+(f.id===exportFormat?' active':'');
+      b.dataset.fmt=f.id;
+      b.innerHTML=`${f.label}<div class="fmt-sub">${f.sub}</div>`;
+      b.addEventListener('click', ()=>{
+        exportFormat=f.id;
+        document.querySelectorAll('.format-btn').forEach(x=>x.classList.toggle('active',x.dataset.fmt===f.id));
         updateExportBtns(); updateExportInfo();
       });
       c.appendChild(b);
     });
   })();
 
-  // === Transport ===
+  // Transport
   btnPlay.addEventListener('click', togglePlay);
-  btnRew.addEventListener('click', () => { if (isPlaying) stopPlayback(); pauseOffset = 0; playbackPos = 0; drawWaveform(); });
-  btnStop.addEventListener('click', () => { stopPlayback(); pauseOffset = 0; playbackPos = 0; drawWaveform(); });
+  btnRew.addEventListener('click', ()=>{if(isPlaying) stopPlayback(); pauseOffset=0; playbackPos=0; drawWaveform();});
+  btnStop.addEventListener('click', ()=>{stopPlayback(); pauseOffset=0; playbackPos=0; drawWaveform();});
 
-  // === Dropzone ===
-  dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('dragover'); });
-  dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
-  dropzone.addEventListener('drop', e => { e.preventDefault(); dropzone.classList.remove('dragover'); addFiles(e.dataTransfer.files); });
-  dropzone.addEventListener('click', () => fileInput.click());
-  fileInput.addEventListener('change', e => { addFiles(e.target.files); e.target.value = ''; });
+  // Dropzone
+  dropzone.addEventListener('dragover', e=>{e.preventDefault();dropzone.classList.add('dragover');});
+  dropzone.addEventListener('dragleave', ()=>dropzone.classList.remove('dragover'));
+  dropzone.addEventListener('drop', e=>{e.preventDefault();dropzone.classList.remove('dragover');addFiles(e.dataTransfer.files);});
+  dropzone.addEventListener('click', ()=>fileInput.click());
+  fileInput.addEventListener('change', e=>{addFiles(e.target.files);e.target.value='';});
 
-  // === EXPORT (FFmpeg WASM — client-side) ===
+  // === EXPORT ===
   function triggerDownload(data, filename, format) {
-    const mimeMap = { mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg' };
-    const blob = new Blob([data.buffer], { type: mimeMap[format] || 'application/octet-stream' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = filename;
-    document.body.appendChild(a); a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    const mimeMap={mp3:'audio/mpeg',wav:'audio/wav',ogg:'audio/ogg'};
+    const blob=new Blob([data.buffer], {type:mimeMap[format]||'application/octet-stream'});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a'); a.href=url; a.download=filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(()=>URL.revokeObjectURL(url),10000);
   }
 
   function makeOutputName(origName, spd, pch, fmt) {
-    const base = origName.replace(/\.[^.]+$/, '');
-    const suffix = [];
-    if (spd !== 1.0) suffix.push(spd + 'x');
-    if (pch !== 0) suffix.push((pch > 0 ? '+' : '') + pch + 'st');
-    return base + (suffix.length ? '_' + suffix.join('_') : '') + '.' + fmt;
+    const base=origName.replace(/\.[^.]+$/,'');
+    const suffix=[];
+    if (spd!==1.0) suffix.push(spd+'x');
+    if (pch!==0) suffix.push((pch>0?'+':'')+pch+'st');
+    return base+(suffix.length?'_'+suffix.join('_'):'')+'.'+fmt;
   }
 
-  btnExport.addEventListener('click', async () => {
-    const f = files[activeIdx]; if (!f) return;
-    const ext = exportFormat.toUpperCase();
-    btnExport.disabled = true;
-    showProgress(`Processing → ${ext}`, `FFmpeg WASM: speed ${speed}x, pitch ${pitch > 0 ? '+' : ''}${pitch}st`);
-
+  btnExport.addEventListener('click', async ()=>{
+    const f=files[activeIdx]; if(!f) return;
+    btnExport.disabled=true;
+    showProgress('Processing → '+exportFormat.toUpperCase(), 'Speed '+speed+'x, Pitch '+(pitch>0?'+':'')+pitch+'st');
     try {
-      // Ensure FFmpeg is loaded
-      if (!ffmpegReady) {
-        updateProgress(10, 'Loading FFmpeg engine...');
-        await loadFFmpeg();
-      }
-
-      updateProgress(30, 'Reading file...');
-      const fileBytes = new Uint8Array(f.arrayBuffer);
-
-      updateProgress(50, 'FFmpeg encoding...');
-
-      // Listen for progress during this encode
-      const progressHandler = ({ progress }) => {
-        const pct = 50 + Math.round(progress * 40);
-        updateProgress(pct, `Encoding... ${Math.round(progress * 100)}%`);
-      };
-      ffmpegInstance.on('progress', progressHandler);
-
+      if (!ffmpegReady) { updateProgress(10,'Loading FFmpeg...'); await loadFFmpeg(); }
+      updateProgress(30,'Reading file...');
+      const fileBytes=new Uint8Array(f.arrayBuffer);
+      updateProgress(50,'FFmpeg encoding...');
       const outputData = await processAudioWasm(fileBytes, f.name, speed, pitch, volume, exportFormat);
-
-      ffmpegInstance.off('progress', progressHandler);
-
-      updateProgress(95, 'Preparing download...');
-      const outputName = makeOutputName(f.name, speed, pitch, exportFormat);
-      triggerDownload(outputData, outputName, exportFormat);
-
-      updateProgress(100, 'Done!');
-      setTimeout(hideProgress, 800);
-    } catch (e) {
-      console.error('Export fail:', e);
-      updateProgress(0, 'Error: ' + e.message);
-      setTimeout(hideProgress, 3000);
+      updateProgress(90,'Preparing download...');
+      triggerDownload(outputData, makeOutputName(f.name,speed,pitch,exportFormat), exportFormat);
+      updateProgress(100,'Done!');
+      setTimeout(hideProgress,800);
+    } catch(e) {
+      console.error('Export fail:',e);
+      updateProgress(0,'Error: '+e.message);
+      setTimeout(hideProgress,3000);
     }
-    btnExport.disabled = false; updateExportBtns();
+    btnExport.disabled=false; updateExportBtns();
   });
 
-  btnExportAll.addEventListener('click', async () => {
-    btnExportAll.disabled = true;
-    const ext = exportFormat.toUpperCase();
-    showProgress(`Bulk Export → ${ext}`, `Processing ${files.length} files...`);
-
+  btnExportAll.addEventListener('click', async ()=>{
+    btnExportAll.disabled=true;
+    showProgress('Bulk Export → '+exportFormat.toUpperCase(), 'Processing '+files.length+' files...');
     try {
-      if (!ffmpegReady) {
-        updateProgress(5, 'Loading FFmpeg engine...');
-        await loadFFmpeg();
-      }
-
-      for (let i = 0; i < files.length; i++) {
-        updateProgress(((i) / files.length) * 100, `Processing ${i + 1}/${files.length}: ${files[i].name}`);
+      if (!ffmpegReady) { updateProgress(5,'Loading FFmpeg...'); await loadFFmpeg(); }
+      for (let i=0;i<files.length;i++) {
+        updateProgress((i/files.length)*100, 'Processing '+(i+1)+'/'+files.length+': '+files[i].name);
         try {
-          const fileBytes = new Uint8Array(files[i].arrayBuffer);
+          const fileBytes=new Uint8Array(files[i].arrayBuffer);
           const outputData = await processAudioWasm(fileBytes, files[i].name, speed, pitch, volume, exportFormat);
-          const outputName = makeOutputName(files[i].name, speed, pitch, exportFormat);
-          triggerDownload(outputData, outputName, exportFormat);
-          await new Promise(r => setTimeout(r, 500));
-        } catch (e) { console.error('Export fail:', files[i].name, e); }
+          triggerDownload(outputData, makeOutputName(files[i].name,speed,pitch,exportFormat), exportFormat);
+          await new Promise(r=>setTimeout(r,500));
+        } catch(e) { console.error('Export fail:',files[i].name,e); }
       }
-
-      updateProgress(100, 'All done!');
-      setTimeout(hideProgress, 800);
-    } catch (e) {
-      console.error('Bulk export fail:', e);
-      updateProgress(0, 'Error: ' + e.message);
-      setTimeout(hideProgress, 3000);
+      updateProgress(100,'All done!');
+      setTimeout(hideProgress,800);
+    } catch(e) {
+      updateProgress(0,'Error: '+e.message);
+      setTimeout(hideProgress,3000);
     }
-    btnExportAll.disabled = false; updateExportBtns();
+    btnExportAll.disabled=false; updateExportBtns();
   });
 
-  window.addEventListener('resize', () => { if (files.length) drawWaveform(); });
+  window.addEventListener('resize', ()=>{if(files.length) drawWaveform();});
   syncUI();
 }
 </script>
