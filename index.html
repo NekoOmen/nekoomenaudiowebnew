@@ -366,7 +366,14 @@ body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;bac
 
 <!-- FFmpeg WASM -->
 <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/umd/ffmpeg.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/umd/util.min.js"></script>
+<script>
+// Polyfill toBlobURL since @ffmpeg/util UMD global is unreliable
+async function toBlobURL(url, mimeType) {
+  const resp = await fetch(url);
+  const blob = new Blob([await resp.arrayBuffer()], { type: mimeType });
+  return URL.createObjectURL(blob);
+}
+</script>
 
 <script>
 // === GATE LOGIC ===
@@ -426,7 +433,7 @@ async function loadFFmpeg() {
   loadingEl.classList.add('show');
 
   try {
-    const { FFmpeg } = FFmpegWASM;
+    const FFmpeg = FFmpegWASM.FFmpeg;
     ffmpegInstance = new FFmpeg();
 
     ffmpegInstance.on('log', ({ message }) => {
@@ -446,7 +453,7 @@ async function loadFFmpeg() {
     status.textContent = 'Downloading FFmpeg WASM core...';
     barFill.style.width = '10%';
 
-    const { toBlobURL } = FFmpegUtil;
+    // toBlobURL defined above as global polyfill
     const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.9/dist/umd';
 
     status.textContent = 'Fetching core JS...';
