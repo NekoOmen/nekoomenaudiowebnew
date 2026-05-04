@@ -11,8 +11,8 @@ ffmpeg.setFfprobePath('/usr/bin/ffprobe');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
-const FFMPEG_TIMEOUT_MS = 240000;       // 4 minutes max per file
-const FILE_TTL_MS = 30 * 60 * 1000;     // 30 min — generous so polling never loses the file
+const FFMPEG_TIMEOUT_MS = 180000;       // 3 minutes max per file
+const FILE_TTL_MS = 30 * 60 * 1000;
 const JOB_TTL_MS = 30 * 60 * 1000;
 
 const UPLOAD_DIR = path.join(__dirname, 'tmp', 'uploads');
@@ -20,8 +20,11 @@ const OUTPUT_DIR = path.join(__dirname, 'tmp', 'outputs');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
-// In-memory job store. jobId -> { status, downloadUrl, filename, error, createdAt, progress }
+// In-memory job store. jobId -> { status, downloadUrl, filename, error, createdAt, ... }
 const jobs = new Map();
+// FIFO queue of jobIds waiting to run (free tier can only handle one FFmpeg at a time)
+const jobQueue = [];
+let activeJobId = null;
 
 // Periodic cleanup
 setInterval(() => {
@@ -95,10 +98,15 @@ function makeDownloadName(originalName, spd, pch, fmt) {
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', ffmpeg: true, queueLength: jobs.size });
+  res.json({
+    status: 'ok',
+    ffmpeg: true,
+    queueLength: jobQueue.length,
+    active: activeJobId ? true : false
+  });
 });
 
-// Submit a job — returns immediately so the gateway never times out
+// Submit a job — returns immediately, work happens in background queue
 app.post('/api/process', uploadSingle, (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No audio file provided' });
 
@@ -114,53 +122,68 @@ app.post('/api/process', uploadSingle, (req, res) => {
   const downloadName = makeDownloadName(req.file.originalname, spd, pch, fmt);
 
   jobs.set(jobId, {
-    status: 'processing',
+    status: 'queued',
     createdAt: Date.now(),
-    progress: 0,
+    inputPath: req.file.path,
+    outputPath,
+    outputName,
+    spd, pch, vol, fmt,
     downloadUrl: null,
     filename: downloadName,
     error: null
   });
 
-  // Respond immediately
-  res.json({ success: true, jobId, statusUrl: `/api/status/${jobId}` });
+  jobQueue.push(jobId);
+  pumpQueue();
 
-  // Process in the background
-  const inputPath = req.file.path;
-  processAudio(inputPath, outputPath, spd, pch, vol, fmt)
-    .then(() => {
-      const job = jobs.get(jobId);
-      if (job) {
-        job.status = 'done';
-        job.progress = 100;
-        job.downloadUrl = `/api/download/${outputName}`;
-      }
-    })
-    .catch((err) => {
-      console.error('Background processing error:', err.message);
-      let msg = err.message || 'Audio processing failed';
-      if (/Invalid data|moov atom not found|does not contain any stream/i.test(msg)) {
-        msg = 'This file appears to be corrupted or not a valid audio file.';
-      } else if (/timeout/i.test(msg)) {
-        msg = 'Processing took too long. Try a smaller or shorter file.';
-      } else if (/codec/i.test(msg)) {
-        msg = 'Unsupported audio codec. Try converting to MP3 first.';
-      }
-      const job = jobs.get(jobId);
-      if (job) { job.status = 'failed'; job.error = msg; }
-    })
-    .finally(() => {
-      try { fs.unlinkSync(inputPath); } catch (e) {}
-    });
+  res.json({ success: true, jobId, statusUrl: `/api/status/${jobId}` });
 });
 
-// Poll job status — quick request, no gateway timeout risk
+// Sequential queue — only one FFmpeg job at a time on free tier
+async function pumpQueue() {
+  if (activeJobId || jobQueue.length === 0) return;
+
+  const jobId = jobQueue.shift();
+  const job = jobs.get(jobId);
+  if (!job) { setImmediate(pumpQueue); return; }
+
+  activeJobId = jobId;
+  job.status = 'processing';
+
+  try {
+    await processAudio(job.inputPath, job.outputPath, job.spd, job.pch, job.vol, job.fmt);
+    job.status = 'done';
+    job.downloadUrl = `/api/download/${job.outputName}`;
+  } catch (err) {
+    console.error('Background processing error:', err.message);
+    let msg = err.message || 'Audio processing failed';
+    if (/Invalid data|moov atom not found|does not contain any stream/i.test(msg)) {
+      msg = 'This file appears to be corrupted or not a valid audio file.';
+    } else if (/timeout/i.test(msg)) {
+      msg = 'The free server could not process this file in time. Try a shorter song (under 3 minutes works best on the free tier).';
+    } else if (/codec/i.test(msg)) {
+      msg = 'Unsupported audio codec. Try converting to MP3 first.';
+    }
+    job.status = 'failed';
+    job.error = msg;
+  } finally {
+    try { fs.unlinkSync(job.inputPath); } catch (e) {}
+    activeJobId = null;
+    setImmediate(pumpQueue);
+  }
+}
+
+// Poll job status
 app.get('/api/status/:jobId', (req, res) => {
-  const job = jobs.get(req.params.jobId);
+  const jobId = req.params.jobId;
+  const job = jobs.get(jobId);
   if (!job) return res.status(404).json({ error: 'Job not found or expired' });
 
-  const response = { status: job.status, progress: job.progress };
-  if (job.status === 'done') {
+  const response = { status: job.status };
+  if (job.status === 'queued') {
+    const idx = jobQueue.indexOf(jobId);
+    response.queuePosition = idx >= 0 ? idx + 1 : 1;
+  } else if (job.status === 'done') {
     response.downloadUrl = job.downloadUrl;
     response.filename = job.filename;
   } else if (job.status === 'failed') {
@@ -235,9 +258,18 @@ async function processAudio(inputPath, outputPath, speed, pitchSemitones, volume
     if (filters.length > 0) cmd = cmd.audioFilter(filters);
 
     switch (format) {
-      case 'mp3': cmd = cmd.audioCodec('libmp3lame').audioBitrate('192k'); break;
-      case 'ogg': cmd = cmd.audioCodec('libvorbis').audioBitrate('192k'); break;
-      case 'wav': cmd = cmd.audioCodec('pcm_s16le'); break;
+      case 'mp3':
+        // compression_level 7 = LAME "fast" preset, ~30% faster encode for slow CPUs
+        cmd = cmd.audioCodec('libmp3lame')
+                 .audioBitrate('192k')
+                 .outputOptions(['-compression_level 7']);
+        break;
+      case 'ogg':
+        cmd = cmd.audioCodec('libvorbis').audioBitrate('192k');
+        break;
+      case 'wav':
+        cmd = cmd.audioCodec('pcm_s16le');
+        break;
     }
 
     let finished = false;
