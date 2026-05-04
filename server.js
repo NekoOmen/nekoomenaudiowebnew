@@ -10,17 +10,20 @@ ffmpeg.setFfprobePath('/usr/bin/ffprobe');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
-const FFMPEG_TIMEOUT_MS = 120000; // 2 minutes max per file
-const FILE_TTL_MS = 15 * 60 * 1000; // 15 min — generous so downloads don't expire mid-click
+const MAX_FILE_SIZE = 50 * 1024 * 1024;
+const FFMPEG_TIMEOUT_MS = 240000;       // 4 minutes max per file
+const FILE_TTL_MS = 30 * 60 * 1000;     // 30 min — generous so polling never loses the file
+const JOB_TTL_MS = 30 * 60 * 1000;
 
-// Temp directories
 const UPLOAD_DIR = path.join(__dirname, 'tmp', 'uploads');
 const OUTPUT_DIR = path.join(__dirname, 'tmp', 'outputs');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
-// Periodic cleanup of stale files
+// In-memory job store. jobId -> { status, downloadUrl, filename, error, createdAt, progress }
+const jobs = new Map();
+
+// Periodic cleanup
 setInterval(() => {
   const now = Date.now();
   [UPLOAD_DIR, OUTPUT_DIR].forEach(dir => {
@@ -34,9 +37,11 @@ setInterval(() => {
       });
     } catch (e) {}
   });
+  for (const [id, job] of jobs.entries()) {
+    if (now - job.createdAt > JOB_TTL_MS) jobs.delete(id);
+  }
 }, 5 * 60 * 1000);
 
-// Multer config
 const storage = multer.diskStorage({
   destination: UPLOAD_DIR,
   filename: (req, file, cb) => cb(null, uuidv4() + path.extname(file.originalname || '.bin'))
@@ -54,15 +59,8 @@ const upload = multer({
   }
 });
 
-// Wrap multer so we can JSON-respond on upload errors instead of HTML 500
 function uploadSingle(req, res, next) {
   upload.single('audio')(req, res, (err) => {
-    if (err) return handleUploadError(err, res);
-    next();
-  });
-}
-function uploadArray(req, res, next) {
-  upload.array('audio', 50)(req, res, (err) => {
     if (err) return handleUploadError(err, res);
     next();
   });
@@ -80,23 +78,28 @@ function handleUploadError(err, res) {
   return res.status(400).json({ error: err.message || 'Upload failed' });
 }
 
-// Build a safe Content-Disposition header that works for non-ASCII filenames (RFC 5987)
 function safeContentDisposition(filename) {
   const fallback = filename.replace(/[^\x20-\x7E]/g, '_').replace(/["\\]/g, '_');
   const encoded = encodeURIComponent(filename);
   return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
 }
 
-// Serve static frontend
+function makeDownloadName(originalName, spd, pch, fmt) {
+  const orig = path.parse(originalName || 'audio').name;
+  const suffix = [];
+  if (spd !== 1.0) suffix.push(`${spd}x`);
+  if (pch !== 0) suffix.push(`${pch > 0 ? '+' : ''}${pch}st`);
+  return orig + (suffix.length ? '_' + suffix.join('_') : '') + '.' + fmt;
+}
+
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Health check
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', ffmpeg: true });
+  res.json({ status: 'ok', ffmpeg: true, queueLength: jobs.size });
 });
 
-// Process single file
-app.post('/api/process', uploadSingle, async (req, res) => {
+// Submit a job — returns immediately so the gateway never times out
+app.post('/api/process', uploadSingle, (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No audio file provided' });
 
   const { speed, pitch, format, volume } = req.body;
@@ -105,76 +108,68 @@ app.post('/api/process', uploadSingle, async (req, res) => {
   const vol = Math.max(0, Math.min(2.0, parseFloat(volume) || 1.0));
   const fmt = ['mp3', 'wav', 'ogg'].includes(format) ? format : 'mp3';
 
-  const inputPath = req.file.path;
+  const jobId = uuidv4();
   const outputName = uuidv4() + '.' + fmt;
   const outputPath = path.join(OUTPUT_DIR, outputName);
+  const downloadName = makeDownloadName(req.file.originalname, spd, pch, fmt);
 
-  try {
-    await processAudio(inputPath, outputPath, spd, pch, vol, fmt);
+  jobs.set(jobId, {
+    status: 'processing',
+    createdAt: Date.now(),
+    progress: 0,
+    downloadUrl: null,
+    filename: downloadName,
+    error: null
+  });
 
-    const origName = path.parse(req.file.originalname || 'audio').name;
-    const suffix = [];
-    if (spd !== 1.0) suffix.push(`${spd}x`);
-    if (pch !== 0) suffix.push(`${pch > 0 ? '+' : ''}${pch}st`);
-    const downloadName = origName + (suffix.length ? '_' + suffix.join('_') : '') + '.' + fmt;
+  // Respond immediately
+  res.json({ success: true, jobId, statusUrl: `/api/status/${jobId}` });
 
-    res.json({
-      success: true,
-      downloadUrl: `/api/download/${outputName}`,
-      filename: downloadName,
-      settings: { speed: spd, pitch: pch, volume: vol, format: fmt }
+  // Process in the background
+  const inputPath = req.file.path;
+  processAudio(inputPath, outputPath, spd, pch, vol, fmt)
+    .then(() => {
+      const job = jobs.get(jobId);
+      if (job) {
+        job.status = 'done';
+        job.progress = 100;
+        job.downloadUrl = `/api/download/${outputName}`;
+      }
+    })
+    .catch((err) => {
+      console.error('Background processing error:', err.message);
+      let msg = err.message || 'Audio processing failed';
+      if (/Invalid data|moov atom not found|does not contain any stream/i.test(msg)) {
+        msg = 'This file appears to be corrupted or not a valid audio file.';
+      } else if (/timeout/i.test(msg)) {
+        msg = 'Processing took too long. Try a smaller or shorter file.';
+      } else if (/codec/i.test(msg)) {
+        msg = 'Unsupported audio codec. Try converting to MP3 first.';
+      }
+      const job = jobs.get(jobId);
+      if (job) { job.status = 'failed'; job.error = msg; }
+    })
+    .finally(() => {
+      try { fs.unlinkSync(inputPath); } catch (e) {}
     });
-  } catch (err) {
-    console.error('Processing error:', err.message);
-    // Friendlier message based on common FFmpeg failure modes
-    let msg = err.message || 'Audio processing failed';
-    if (/Invalid data|moov atom not found|does not contain any stream/i.test(msg)) {
-      msg = 'This file appears to be corrupted or not a valid audio file.';
-    } else if (/timeout/i.test(msg)) {
-      msg = 'Processing took too long. Try a smaller or shorter file.';
-    } else if (/codec/i.test(msg)) {
-      msg = 'Unsupported audio codec in this file. Try converting to MP3 first.';
-    }
-    res.status(500).json({ error: msg });
-  } finally {
-    try { fs.unlinkSync(inputPath); } catch (e) {}
-  }
 });
 
-// Bulk process
-app.post('/api/process-bulk', uploadArray, async (req, res) => {
-  if (!req.files || !req.files.length) return res.status(400).json({ error: 'No audio files provided' });
+// Poll job status — quick request, no gateway timeout risk
+app.get('/api/status/:jobId', (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'Job not found or expired' });
 
-  const { speed, pitch, format, volume } = req.body;
-  const spd = Math.max(0.25, Math.min(4.0, parseFloat(speed) || 1.0));
-  const pch = Math.max(-12, Math.min(12, parseInt(pitch) || 0));
-  const vol = Math.max(0, Math.min(2.0, parseFloat(volume) || 1.0));
-  const fmt = ['mp3', 'wav', 'ogg'].includes(format) ? format : 'mp3';
-
-  const results = [];
-  for (const file of req.files) {
-    const outputName = uuidv4() + '.' + fmt;
-    const outputPath = path.join(OUTPUT_DIR, outputName);
-    try {
-      await processAudio(file.path, outputPath, spd, pch, vol, fmt);
-      const origName = path.parse(file.originalname || 'audio').name;
-      const suffix = [];
-      if (spd !== 1.0) suffix.push(`${spd}x`);
-      if (pch !== 0) suffix.push(`${pch > 0 ? '+' : ''}${pch}st`);
-      const downloadName = origName + (suffix.length ? '_' + suffix.join('_') : '') + '.' + fmt;
-      results.push({ success: true, downloadUrl: `/api/download/${outputName}`, filename: downloadName, original: file.originalname });
-    } catch (err) {
-      results.push({ success: false, error: err.message, original: file.originalname });
-    } finally {
-      try { fs.unlinkSync(file.path); } catch (e) {}
-    }
+  const response = { status: job.status, progress: job.progress };
+  if (job.status === 'done') {
+    response.downloadUrl = job.downloadUrl;
+    response.filename = job.filename;
+  } else if (job.status === 'failed') {
+    response.error = job.error;
   }
-  res.json({ results });
+  res.json(response);
 });
 
-// Download — robust against retries and special chars in filename
 app.get('/api/download/:filename', (req, res) => {
-  // Prevent path traversal
   const safeName = path.basename(req.params.filename);
   const filePath = path.join(OUTPUT_DIR, safeName);
 
@@ -190,9 +185,6 @@ app.get('/api/download/:filename', (req, res) => {
   res.setHeader('Content-Disposition', safeContentDisposition(downloadName));
   res.setHeader('Cache-Control', 'no-store');
 
-  // Don't delete the file immediately — let the periodic cleanup handle it.
-  // Browsers sometimes do range requests / retries, and aggressive deletion
-  // was a major cause of "server error" reports.
   res.sendFile(filePath, (err) => {
     if (err && !res.headersSent) {
       res.status(500).json({ error: 'Download failed' });
@@ -200,7 +192,6 @@ app.get('/api/download/:filename', (req, res) => {
   });
 });
 
-// Probe input for actual sample rate
 function probeAudio(inputPath) {
   return new Promise((resolve, reject) => {
     ffmpeg.ffprobe(inputPath, (err, metadata) => {
@@ -216,7 +207,6 @@ function probeAudio(inputPath) {
   });
 }
 
-// FFmpeg pipeline with timeout
 async function processAudio(inputPath, outputPath, speed, pitchSemitones, volume, format) {
   const info = await probeAudio(inputPath);
   const outputRate = 44100;
@@ -237,7 +227,11 @@ async function processAudio(inputPath, outputPath, speed, pitchSemitones, volume
     }
     if (volume !== 1.0) filters.push(`volume=${volume.toFixed(2)}`);
 
-    let cmd = ffmpeg(inputPath).audioChannels(2).audioFrequency(outputRate);
+    let cmd = ffmpeg(inputPath)
+      .audioChannels(2)
+      .audioFrequency(outputRate)
+      .outputOptions(['-threads 0']);
+
     if (filters.length > 0) cmd = cmd.audioFilter(filters);
 
     switch (format) {
@@ -269,7 +263,6 @@ async function processAudio(inputPath, outputPath, speed, pitchSemitones, volume
   });
 }
 
-// Last-resort error handler for anything that slipped through
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
   if (res.headersSent) return next(err);
@@ -277,5 +270,5 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n  ♫ Nomen Audio Studio running on port ${PORT}\n`);
+  console.log(`\n  Nomen Audio Studio running on port ${PORT}\n`);
 });
