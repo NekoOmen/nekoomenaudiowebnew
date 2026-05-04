@@ -34,6 +34,8 @@ body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;bac
 .dropzone .icon{font-size:40px;margin-bottom:10px}
 .dropzone .title{font-size:17px;font-weight:600;margin-bottom:4px}
 .dropzone .sub{font-size:12px;color:var(--dim)}
+.tier-warn{background:rgba(255,171,64,.08);border:1px solid rgba(255,171,64,.3);border-radius:10px;padding:10px 14px;margin-bottom:16px;font-size:11px;color:var(--warn);font-family:'JetBrains Mono',monospace;line-height:1.5}
+.tier-warn b{color:var(--warn)}
 .file-tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px}
 .file-tab{display:flex;align-items:center;gap:7px;padding:7px 12px;border-radius:8px;cursor:pointer;background:var(--surface);border:1px solid var(--border);font-size:11px;font-family:'JetBrains Mono',monospace;transition:all .2s;animation:slideUp .3s ease-out both}
 .file-tab.active{border-color:var(--accent);background:rgba(0,229,255,.07)}
@@ -224,10 +226,13 @@ body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;bac
     <h1>Process Audio for <span class="accent">Roblox</span></h1>
     <p>Server-side FFmpeg — independent pitch & speed control, real MP3/OGG encoding. Bypass Roblox copyright filters.</p>
   </div>
+  <div class="tier-warn">
+    <b>FREE TIER NOTE:</b> This server runs on free hosting (0.1 vCPU). For best results, use songs <b>under 3 minutes</b>. Longer songs may time out — try shortening them first or expect occasional failures.
+  </div>
   <div class="dropzone empty" id="dropzone">
     <div class="icon">🎵</div>
     <div class="title">Drop audio files here</div>
-    <div class="sub">MP3, WAV, OGG, FLAC, M4A — up to 50MB per file</div>
+    <div class="sub">MP3, WAV, OGG, FLAC, M4A — up to 50MB · short songs work best</div>
   </div>
   <input type="file" id="fileInput" accept="audio/*" multiple hidden>
   <div class="features" id="features">
@@ -322,7 +327,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;bac
 (()=>{
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
 const POLL_INTERVAL_MS = 2000;
-const POLL_MAX_WAIT_MS = 5 * 60 * 1000; // 5 min ceiling
+const POLL_MAX_WAIT_MS = 10 * 60 * 1000; // 10 min ceiling (allows for queue + processing)
 
 let files=[],activeIdx=0;
 let speed=1.0,pitch=0,volume=1.0;
@@ -365,7 +370,6 @@ const exportInfo=$('exportInfo'),infoStrip=$('infoStrip');
 const autoIndicator=$('autoIndicator');
 const progressOverlay=$('progressOverlay');
 
-// ---------- TOAST ----------
 function toast(title, body, type){
   type = type || 'error';
   const stack = $('toastStack');
@@ -416,7 +420,11 @@ async function addFiles(fileList){
       continue;
     }
     try {
-      files.push(await loadFile(f));
+      const loaded = await loadFile(f);
+      if (loaded.duration > 240) {
+        toast('Long song warning', f.name + ' is over 4 minutes — may time out on free tier. Consider shortening first.', 'warn');
+      }
+      files.push(loaded);
     } catch (e) {
       console.error('Decode failed:', f.name, e);
       toast(
@@ -482,7 +490,7 @@ function removeFile(idx){
     features.style.display='';
     dropzone.classList.add('empty');
     dropzone.classList.remove('has-files');
-    dropzone.innerHTML='<div class="icon">🎵</div><div class="title">Drop audio files here</div><div class="sub">MP3, WAV, OGG, FLAC, M4A — up to 50MB per file</div>';
+    dropzone.innerHTML='<div class="icon">🎵</div><div class="title">Drop audio files here</div><div class="sub">MP3, WAV, OGG, FLAC, M4A — up to 50MB · short songs work best</div>';
   }
   if(activeIdx>=files.length)activeIdx=Math.max(0,files.length-1);
   renderTabs();
@@ -795,9 +803,7 @@ dropzone.addEventListener('drop',e=>{
 dropzone.addEventListener('click',()=>fileInput.click());
 fileInput.addEventListener('change',e=>{addFiles(e.target.files);e.target.value=''});
 
-// ---------- ASYNC EXPORT WITH POLLING ----------
-// Submits a job, polls /api/status/:jobId until done.
-// Avoids gateway 504 errors because no single HTTP request takes long.
+// ---------- ASYNC EXPORT WITH POLLING + QUEUE ----------
 async function serverExport(fileData, onProgress) {
   const formData = new FormData();
   formData.append('audio', fileData.file);
@@ -806,7 +812,6 @@ async function serverExport(fileData, onProgress) {
   formData.append('volume', volume);
   formData.append('format', exportFormat);
 
-  // Step 1: submit job
   let resp;
   try {
     resp = await fetch('/api/process', { method: 'POST', body: formData });
@@ -825,10 +830,10 @@ async function serverExport(fileData, onProgress) {
     throw new Error(data.error || 'Server error (status ' + resp.status + ')');
   }
 
-  // Step 2: poll for completion
   const jobId = data.jobId;
   const startTime = Date.now();
   let consecutiveErrors = 0;
+  let processingStartTime = null;
 
   while (Date.now() - startTime < POLL_MAX_WAIT_MS) {
     await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
@@ -859,14 +864,22 @@ async function serverExport(fileData, onProgress) {
     if (statusData.status === 'failed') {
       throw new Error(statusData.error || 'Processing failed');
     }
-    // Still processing — update UI
-    if (onProgress) {
-      const elapsed = Math.round((Date.now() - startTime) / 1000);
-      onProgress('Processing on server... (' + elapsed + 's)');
+    if (statusData.status === 'queued') {
+      if (onProgress) {
+        const pos = statusData.queuePosition || 1;
+        if (pos === 1) onProgress('Next in queue — starting soon...');
+        else onProgress('Waiting in queue (' + pos + ' ahead)...');
+      }
+    } else if (statusData.status === 'processing') {
+      if (!processingStartTime) processingStartTime = Date.now();
+      if (onProgress) {
+        const elapsed = Math.round((Date.now() - processingStartTime) / 1000);
+        onProgress('FFmpeg encoding on server... (' + elapsed + 's)');
+      }
     }
   }
 
-  throw new Error('Processing took too long. Try a smaller file or try again later.');
+  throw new Error('Processing took too long. Try a shorter song.');
 }
 
 function triggerDownload(url, filename){
@@ -906,7 +919,7 @@ btnExport.addEventListener('click',async()=>{
 btnExportAll.addEventListener('click',async()=>{
   btnExportAll.disabled=true;
   const ext=exportFormat.toUpperCase();
-  showProgress(`Bulk Export → ${ext}`,`Processing ${files.length} files one at a time...`);
+  showProgress(`Bulk Export → ${ext}`,`Processing ${files.length} files (queued one at a time)...`);
   let successCount=0, failCount=0;
   for(let i=0;i<files.length;i++){
     const baseProgress = (i/files.length)*100;
