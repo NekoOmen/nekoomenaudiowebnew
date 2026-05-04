@@ -42,6 +42,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;bac
 .file-tab .fdur{color:var(--dim);font-size:9px}
 .file-tab .fclose{background:none;border:none;color:var(--dim);cursor:pointer;font-size:14px;padding:0 2px;line-height:1}
 .file-tab .fclose:hover{color:var(--danger)}
+.file-tab.broken{border-color:rgba(255,171,64,.4)}
 .wave-panel{background:var(--surface);border-radius:14px;padding:16px;border:1px solid var(--border);margin-bottom:16px}
 .wave-panel .info-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--dim);flex-wrap:wrap;gap:4px}
 .wave-panel .info-row .fname{color:var(--text)}
@@ -125,6 +126,14 @@ body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;bac
 .prog-bar{height:6px;background:var(--border);border-radius:3px;overflow:hidden}
 .prog-bar-fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));border-radius:3px;transition:width .3s;width:0%}
 .prog-status{font-size:10px;color:var(--dim);font-family:'JetBrains Mono',monospace;margin-top:8px}
+.toast-stack{position:fixed;bottom:20px;right:20px;z-index:300;display:flex;flex-direction:column;gap:8px;max-width:340px;pointer-events:none}
+.toast{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 14px;font-size:12px;animation:slideIn .3s ease-out;box-shadow:0 4px 20px rgba(0,0,0,.4);pointer-events:auto}
+.toast.error{border-color:var(--danger);background:rgba(255,82,82,.08);color:#ffaaaa}
+.toast.warn{border-color:var(--warn);background:rgba(255,171,64,.08);color:#ffd699}
+.toast.success{border-color:var(--success);background:rgba(0,230,118,.08);color:#aaffcc}
+.toast .t-title{font-weight:700;margin-bottom:2px;font-family:'JetBrains Mono',monospace;font-size:11px}
+.toast .t-body{color:var(--dim);font-size:11px;line-height:1.4}
+@keyframes slideIn{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:translateX(0)}}
 @keyframes slideUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
 @keyframes fadeIn{from{opacity:0}to{opacity:1}}
 @keyframes glow{0%,100%{box-shadow:0 0 8px rgba(255,171,64,.2)}50%{box-shadow:0 0 16px rgba(255,171,64,.4)}}
@@ -307,9 +316,582 @@ body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;bac
     <div class="prog-status" id="progStatus">Uploading...</div>
   </div>
 </div>
+<div class="toast-stack" id="toastStack"></div>
 <script>
 (function(){const GATE_KEY='nomen_audio_gate_passed';const gateOverlay=document.getElementById('gateOverlay');const mainApp=document.getElementById('mainApp');const gateContinue=document.getElementById('gateContinue');const btnYT=document.getElementById('btnYT');const btnTT=document.getElementById('btnTT');const gateYT=document.getElementById('gateYT');const gateTT=document.getElementById('gateTT');let ytClicked=false,ttClicked=false;if(localStorage.getItem(GATE_KEY)==='true'){gateOverlay.classList.add('hidden');mainApp.style.display='';return}function checkUnlock(){if(ytClicked&&ttClicked){gateContinue.disabled=false;gateContinue.className='gate-continue unlocked';gateContinue.textContent='🚀 CONTINUE TO NOMEN AUDIO'}}btnYT.addEventListener('click',function(){ytClicked=true;gateYT.classList.add('done');checkUnlock()});btnTT.addEventListener('click',function(){ttClicked=true;gateTT.classList.add('done');checkUnlock()});gateContinue.addEventListener('click',function(){if(!ytClicked||!ttClicked)return;localStorage.setItem(GATE_KEY,'true');gateOverlay.style.transition='opacity .4s';gateOverlay.style.opacity='0';setTimeout(function(){gateOverlay.classList.add('hidden');mainApp.style.display=''},400)})})();
-(()=>{let files=[],activeIdx=0;let speed=1.0,pitch=0,volume=1.0;let isPlaying=false,playbackPos=0;let audioCtx=null,sourceNode=null,gainNode=null;let startTime=0,pauseOffset=0,raf=null;let activeAutoMode=null;let exportFormat='mp3';const autoModes=[{id:'autobypass',label:'⚡ AUTO BYPASS',desc:'Recommended · One click',speed:2.0,pitch:1,featured:true},{id:'speed2x',label:'2x Speed',desc:'Speed only',speed:2.0,pitch:0},{id:'speed15x',label:'1.5x Speed',desc:'Moderate',speed:1.5,pitch:0},{id:'pitch3',label:'Pitch +3st',desc:'Pitch only',speed:1.0,pitch:3},{id:'combo',label:'1.5x +2st',desc:'Speed + pitch',speed:1.5,pitch:2}];const presets=[{label:'Nightcore',speed:1.25,pitch:3},{label:'Slowed',speed:0.8,pitch:-2},{label:'Chipmunk',speed:1.0,pitch:7},{label:'Deep',speed:1.0,pitch:-5},{label:'Vaporwave',speed:0.7,pitch:-3},{label:'Reset',speed:1.0,pitch:0}];const formats=[{id:'mp3',label:'MP3',sub:'192kbps · Universal'},{id:'ogg',label:'OGG',sub:'Roblox native format'},{id:'wav',label:'WAV',sub:'Lossless · Large file'}];const $=id=>document.getElementById(id);const dropzone=$('dropzone'),fileInput=$('fileInput');const hero=$('hero'),features=$('features'),editor=$('editor');const fileTabs=$('fileTabs'),fileCount=$('fileCount');const waveCanvas=$('waveCanvas'),wCtx=waveCanvas.getContext('2d');const waveFileName=$('waveFileName'),waveTime=$('waveTime');const btnPlay=$('btnPlay'),btnRew=$('btnRew'),btnStop=$('btnStop');const btnExport=$('btnExport'),btnExportAll=$('btnExportAll');const exportInfo=$('exportInfo'),infoStrip=$('infoStrip');const autoIndicator=$('autoIndicator');const progressOverlay=$('progressOverlay');function getCtx(){if(!audioCtx)audioCtx=new(window.AudioContext||window.webkitAudioContext)();return audioCtx}function fmtTime(s){if(!isFinite(s)||s<0)s=0;return Math.floor(s/60)+':'+String(Math.floor(s%60)).padStart(2,'0')}function fmtSize(b){return b<1048576?(b/1024).toFixed(1)+' KB':(b/1048576).toFixed(1)+' MB'}function previewRate(){return speed*Math.pow(2,pitch/12)}function showProgress(title,sub){$('progTitle').textContent=title;$('progSub').textContent=sub;$('progBarFill').style.width='0%';$('progStatus').textContent='Starting...';progressOverlay.classList.add('show')}function updateProgress(pct,status){$('progBarFill').style.width=pct+'%';$('progStatus').textContent=status}function hideProgress(){progressOverlay.classList.remove('show')}async function loadFile(file){const ctx=getCtx();const buf=await file.arrayBuffer();const ab=await ctx.decodeAudioData(buf);return{name:file.name,size:file.size,file:file,audioBuffer:ab,duration:ab.duration}}async function addFiles(fileList){const valid=Array.from(fileList).filter(f=>f.type.startsWith('audio/')||/\.(mp3|wav|ogg|flac|m4a|aac|webm)$/i.test(f.name));for(const f of valid){try{files.push(await loadFile(f))}catch(e){console.error('Load fail:',f.name,e)}}if(files.length){hero.style.display='none';features.style.display='none';editor.style.display='block';dropzone.classList.remove('empty');dropzone.classList.add('has-files');dropzone.innerHTML='<div class="sub">+ Drop more files or click to add</div>'}renderTabs();selectFile(activeIdx);updateFileCount()}function updateFileCount(){fileCount.textContent=files.length+' FILE'+(files.length!==1?'S':'');btnExportAll.style.display=files.length>1?'block':'none';updateExportBtns()}function renderTabs(){fileTabs.innerHTML='';files.forEach((f,i)=>{const t=document.createElement('div');t.className='file-tab'+(i===activeIdx?' active':'');t.style.animationDelay=(i*40)+'ms';t.innerHTML=`<span style="color:${i===activeIdx?'var(--accent)':'var(--dim)'}">♫</span><span class="fname">${f.name}</span><span class="fdur">${fmtTime(f.duration)}</span><button class="fclose">×</button>`;t.addEventListener('click',e=>{if(!e.target.classList.contains('fclose')){stopPlayback();selectFile(i)}});t.querySelector('.fclose').addEventListener('click',e=>{e.stopPropagation();removeFile(i)});fileTabs.appendChild(t)})}function removeFile(idx){if(idx===activeIdx&&isPlaying)stopPlayback();files.splice(idx,1);if(!files.length){editor.style.display='none';hero.style.display='';features.style.display='';dropzone.classList.add('empty');dropzone.classList.remove('has-files');dropzone.innerHTML='<div class="icon">🎵</div><div class="title">Drop audio files here</div><div class="sub">MP3, WAV, OGG, FLAC, M4A — up to 50MB per file</div>'}if(activeIdx>=files.length)activeIdx=Math.max(0,files.length-1);renderTabs();if(files.length)selectFile(activeIdx);updateFileCount()}function selectFile(idx){activeIdx=idx;renderTabs();const f=files[activeIdx];if(!f)return;waveFileName.textContent=f.name;playbackPos=0;pauseOffset=0;drawWaveform();updateStats();updateExportInfo()}function drawWaveform(){const f=files[activeIdx];const dpr=window.devicePixelRatio||1;const rect=waveCanvas.getBoundingClientRect();waveCanvas.width=rect.width*dpr;waveCanvas.height=rect.height*dpr;wCtx.scale(dpr,dpr);const W=rect.width,H=rect.height;wCtx.clearRect(0,0,W,H);wCtx.fillStyle='#161624';wCtx.fillRect(0,0,W,H);if(!f)return;const data=f.audioBuffer.getChannelData(0);const step=Math.ceil(data.length/W);for(let i=0;i<W;i++){let mn=1,mx=-1;for(let j=0;j<step;j++){const v=data[i*step+j]||0;if(v<mn)mn=v;if(v>mx)mx=v}const top=(1+mn)*H/2,bot=(1+mx)*H/2,bH=Math.max(bot-top,1);const played=playbackPos>0&&(i/W)<playbackPos;const g=wCtx.createLinearGradient(i,top,i,top+bH);if(played){g.addColorStop(0,'#00e5ff');g.addColorStop(1,'#9c6cff')}else{g.addColorStop(0,'#3a3a52');g.addColorStop(1,'#252540')}wCtx.fillStyle=g;wCtx.fillRect(i,top,2,bH)}if(playbackPos>0&&playbackPos<1){const x=playbackPos*W;wCtx.strokeStyle='#fff';wCtx.lineWidth=2;wCtx.shadowColor='#00e5ff';wCtx.shadowBlur=8;wCtx.beginPath();wCtx.moveTo(x,0);wCtx.lineTo(x,H);wCtx.stroke();wCtx.shadowBlur=0}waveTime.textContent=fmtTime(f.duration*playbackPos)+' / '+fmtTime(f.duration)+' · '+fmtSize(f.size)}waveCanvas.addEventListener('click',e=>{const f=files[activeIdx];if(!f)return;const rect=waveCanvas.getBoundingClientRect();pauseOffset=((e.clientX-rect.left)/rect.width)*f.audioBuffer.duration;playbackPos=pauseOffset/f.audioBuffer.duration;drawWaveform();if(isPlaying){stopSilent();startPlayback()}});function startPlayback(){const f=files[activeIdx];if(!f)return;const ctx=getCtx();if(ctx.state==='suspended')ctx.resume();const src=ctx.createBufferSource();src.buffer=f.audioBuffer;src.playbackRate.value=previewRate();const gain=ctx.createGain();gain.gain.value=volume;gainNode=gain;src.connect(gain);gain.connect(ctx.destination);src.start(0,pauseOffset||0);startTime=ctx.currentTime-(pauseOffset||0)/previewRate();sourceNode=src;isPlaying=true;btnPlay.textContent='⏸';function tick(){if(!isPlaying)return;const elapsed=(ctx.currentTime-startTime)*previewRate();const pos=elapsed/f.audioBuffer.duration;if(pos>=1){stopPlayback();playbackPos=0;pauseOffset=0;drawWaveform();return}playbackPos=pos;drawWaveform();raf=requestAnimationFrame(tick)}raf=requestAnimationFrame(tick);src.onended=()=>{if(sourceNode===src){stopPlayback();playbackPos=0;pauseOffset=0;drawWaveform()}}}function stopSilent(){if(sourceNode){try{sourceNode.stop()}catch(e){}sourceNode.disconnect();sourceNode=null}if(raf)cancelAnimationFrame(raf);isPlaying=false}function stopPlayback(){stopSilent();btnPlay.textContent='▶'}function togglePlay(){if(isPlaying){pauseOffset=(getCtx().currentTime-startTime)*previewRate();stopPlayback()}else startPlayback()}function applyLive(){if(sourceNode){const ctx=getCtx();const curOff=(ctx.currentTime-startTime)*sourceNode.playbackRate.value;const nr=previewRate();sourceNode.playbackRate.value=nr;startTime=ctx.currentTime-curOff/nr}if(gainNode)gainNode.gain.value=volume;updateStats();updateExportInfo();highlightPreset();highlightAuto()}function updateKnob(id,pct,color){const ring=$(id);ring.style.background=`conic-gradient(from -135deg, ${color} 0deg, ${color} ${pct/100*270}deg, #252538 ${pct/100*270}deg, #252538 270deg, transparent 270deg)`;const needle=ring.querySelector('.knob-needle');needle.style.transform=`rotate(${-135+pct/100*270}deg)`;needle.style.background=color;needle.style.boxShadow=`0 0 6px ${color}`}function syncUI(){const sPct=((speed-0.25)/3.75)*100;$('sliderSpeed').value=speed;$('sliderSpeedVal').textContent=speed.toFixed(2)+'x';$('sliderSpeedFill').style.width=sPct+'%';$('knobSpeedVal').textContent=speed.toFixed(2)+'x';updateKnob('knobSpeed',sPct,'#00e5ff');const pPct=((pitch+12)/24)*100;$('sliderPitch').value=pitch;$('sliderPitchVal').textContent=pitch+' st';$('sliderPitchFill').style.width=pPct+'%';$('knobPitchVal').textContent=(pitch>0?'+':'')+pitch+'st';updateKnob('knobPitch',pPct,'#9c6cff');const vPct=(volume/2)*100;$('sliderVolume').value=volume;$('sliderVolumeVal').textContent=Math.round(volume*100)+'%';$('sliderVolumeFill').style.width=vPct+'%';$('knobVolumeVal').textContent=Math.round(volume*100)+'%';updateKnob('knobVolume',vPct,'#00e676');applyLive()}function updateStats(){const f=files[activeIdx];if(!f)return;$('statRate').textContent='44100Hz';$('statCh').textContent='Stereo';$('statOrig').textContent=fmtTime(f.duration);$('statProc').textContent=fmtTime(f.duration/speed)}function updateExportInfo(){const f=files[activeIdx];if(!f)return;const fmtInfo={mp3:'MP3 192kbps',ogg:'OGG Vorbis',wav:'WAV 16bit'};exportInfo.innerHTML=`Output: ${fmtInfo[exportFormat]} · 44100Hz · Stereo<br>Speed: ${speed.toFixed(2)}x (atempo) · Pitch: ${pitch>0?'+':''}${pitch}st (asetrate) · Independent processing`}function updateExportBtns(){const ext=exportFormat.toUpperCase();btnExport.textContent=`EXPORT CURRENT → ${ext}`;if(files.length>1)btnExportAll.textContent=`EXPORT ALL ${files.length} FILES → ${ext}`}$('sliderSpeed').addEventListener('input',e=>{speed=parseFloat(e.target.value);activeAutoMode=null;syncUI()});$('sliderPitch').addEventListener('input',e=>{pitch=parseInt(e.target.value);activeAutoMode=null;syncUI()});$('sliderVolume').addEventListener('input',e=>{volume=parseFloat(e.target.value);syncUI()});function setupKnob(knobId,param,min,max,stepSize){const el=$(knobId);let dragging=false,sy=0,sv=0;el.addEventListener('pointerdown',e=>{dragging=true;sy=e.clientY;sv=param==='speed'?speed:param==='pitch'?pitch:volume;el.setPointerCapture(e.pointerId)});el.addEventListener('pointermove',e=>{if(!dragging)return;let nv=sv+((sy-e.clientY)/150)*(max-min);nv=Math.round(nv/stepSize)*stepSize;nv=Math.max(min,Math.min(max,nv));if(param==='speed'){speed=nv;activeAutoMode=null}else if(param==='pitch'){pitch=nv;activeAutoMode=null}else volume=nv;syncUI()});el.addEventListener('pointerup',()=>dragging=false);el.addEventListener('pointercancel',()=>dragging=false)}setupKnob('knobSpeed','speed',0.25,4.0,0.05);setupKnob('knobPitch','pitch',-12,12,1);setupKnob('knobVolume','volume',0,2.0,0.05);(function(){const c=$('autoModes');autoModes.forEach(m=>{const b=document.createElement('button');b.className='auto-btn'+(m.featured?' auto-featured':'');b.dataset.id=m.id;b.innerHTML=`${m.label}<div class="detail">${m.desc}</div>`;b.addEventListener('click',()=>{if(activeAutoMode===m.id){activeAutoMode=null;speed=1.0;pitch=0}else{activeAutoMode=m.id;speed=m.speed;pitch=m.pitch}syncUI()});c.appendChild(b)})})();function highlightAuto(){document.querySelectorAll('.auto-btn').forEach(b=>b.classList.toggle('active',b.dataset.id===activeAutoMode));const on=activeAutoMode!==null;autoIndicator.style.display=on?'block':'none';const s=$('autoSection');s.classList.toggle('auto-active-glow',on);s.style.borderColor=on?'rgba(255,171,64,.3)':'';s.style.background=on?'rgba(255,171,64,.04)':''}(function(){presets.forEach(p=>{const b=document.createElement('button');b.className='preset-btn';b.dataset.speed=p.speed;b.dataset.pitch=p.pitch;b.innerHTML=`${p.label}<div class="preset-detail">${p.speed}x / ${p.pitch>0?'+':''}${p.pitch}st</div>`;b.addEventListener('click',()=>{speed=p.speed;pitch=p.pitch;activeAutoMode=null;syncUI()});$('presetsGrid').appendChild(b)})})();function highlightPreset(){document.querySelectorAll('.preset-btn').forEach(b=>b.classList.toggle('active',Math.abs(speed-parseFloat(b.dataset.speed))<0.01&&pitch===parseInt(b.dataset.pitch)))}(function(){const c=$('formatSelector');formats.forEach(f=>{const b=document.createElement('button');b.className='format-btn'+(f.id===exportFormat?' active':'');b.dataset.fmt=f.id;b.innerHTML=`${f.label}<div class="fmt-sub">${f.sub}</div>`;b.addEventListener('click',()=>{exportFormat=f.id;document.querySelectorAll('.format-btn').forEach(x=>x.classList.toggle('active',x.dataset.fmt===f.id));updateExportBtns();updateExportInfo()});c.appendChild(b)})})();btnPlay.addEventListener('click',togglePlay);btnRew.addEventListener('click',()=>{if(isPlaying)stopPlayback();pauseOffset=0;playbackPos=0;drawWaveform()});btnStop.addEventListener('click',()=>{stopPlayback();pauseOffset=0;playbackPos=0;drawWaveform()});dropzone.addEventListener('dragover',e=>{e.preventDefault();dropzone.classList.add('dragover')});dropzone.addEventListener('dragleave',()=>dropzone.classList.remove('dragover'));dropzone.addEventListener('drop',e=>{e.preventDefault();dropzone.classList.remove('dragover');addFiles(e.dataTransfer.files)});dropzone.addEventListener('click',()=>fileInput.click());fileInput.addEventListener('change',e=>{addFiles(e.target.files);e.target.value=''});async function serverExport(fileData){const formData=new FormData();formData.append('audio',fileData.file);formData.append('speed',speed);formData.append('pitch',pitch);formData.append('volume',volume);formData.append('format',exportFormat);const resp=await fetch('/api/process',{method:'POST',body:formData});if(!resp.ok){const err=await resp.json().catch(()=>({error:'Server error'}));throw new Error(err.error||'Processing failed')}return await resp.json()}btnExport.addEventListener('click',async()=>{const f=files[activeIdx];if(!f)return;const ext=exportFormat.toUpperCase();btnExport.disabled=true;showProgress(`Processing → ${ext}`,`FFmpeg: speed ${speed}x, pitch ${pitch>0?'+':''}${pitch}st`);updateProgress(30,'Uploading to server...');try{updateProgress(60,'FFmpeg encoding...');const result=await serverExport(f);updateProgress(90,'Downloading...');const a=document.createElement('a');a.href=result.downloadUrl+'?name='+encodeURIComponent(result.filename);a.download=result.filename;a.click();updateProgress(100,'Done!');setTimeout(hideProgress,800)}catch(e){console.error('Export fail:',e);updateProgress(0,'Error: '+e.message);setTimeout(hideProgress,3000)}btnExport.disabled=false;updateExportBtns()});btnExportAll.addEventListener('click',async()=>{btnExportAll.disabled=true;const ext=exportFormat.toUpperCase();showProgress(`Bulk Export → ${ext}`,`Processing ${files.length} files...`);for(let i=0;i<files.length;i++){updateProgress(((i)/files.length)*100,`Processing ${i+1}/${files.length}: ${files[i].name}`);try{const result=await serverExport(files[i]);const a=document.createElement('a');a.href=result.downloadUrl+'?name='+encodeURIComponent(result.filename);a.download=result.filename;a.click();await new Promise(r=>setTimeout(r,500))}catch(e){console.error('Export fail:',files[i].name,e)}}updateProgress(100,'All done!');setTimeout(hideProgress,800);btnExportAll.disabled=false;updateExportBtns()});window.addEventListener('resize',()=>{if(files.length)drawWaveform()});fetch('/api/health').then(r=>r.json()).then(d=>{$('serverBadge').textContent=d.ffmpeg?'⚡ FFmpeg Online':'⚠ FFmpeg Missing'}).catch(()=>{$('serverBadge').textContent='⚠ Server Offline';$('serverBadge').style.color='var(--danger)';$('serverBadge').style.borderColor='rgba(255,82,82,.3)'});syncUI()})();
+(()=>{
+const MAX_FILE_SIZE = 50 * 1024 * 1024;
+let files=[],activeIdx=0;
+let speed=1.0,pitch=0,volume=1.0;
+let isPlaying=false,playbackPos=0;
+let audioCtx=null,sourceNode=null,gainNode=null;
+let startTime=0,pauseOffset=0,raf=null;
+let activeAutoMode=null;
+let exportFormat='mp3';
+
+const autoModes=[
+  {id:'autobypass',label:'⚡ AUTO BYPASS',desc:'Recommended · One click',speed:2.0,pitch:1,featured:true},
+  {id:'speed2x',label:'2x Speed',desc:'Speed only',speed:2.0,pitch:0},
+  {id:'speed15x',label:'1.5x Speed',desc:'Moderate',speed:1.5,pitch:0},
+  {id:'pitch3',label:'Pitch +3st',desc:'Pitch only',speed:1.0,pitch:3},
+  {id:'combo',label:'1.5x +2st',desc:'Speed + pitch',speed:1.5,pitch:2}
+];
+const presets=[
+  {label:'Nightcore',speed:1.25,pitch:3},
+  {label:'Slowed',speed:0.8,pitch:-2},
+  {label:'Chipmunk',speed:1.0,pitch:7},
+  {label:'Deep',speed:1.0,pitch:-5},
+  {label:'Vaporwave',speed:0.7,pitch:-3},
+  {label:'Reset',speed:1.0,pitch:0}
+];
+const formats=[
+  {id:'mp3',label:'MP3',sub:'192kbps · Universal'},
+  {id:'ogg',label:'OGG',sub:'Roblox native format'},
+  {id:'wav',label:'WAV',sub:'Lossless · Large file'}
+];
+
+const $=id=>document.getElementById(id);
+const dropzone=$('dropzone'),fileInput=$('fileInput');
+const hero=$('hero'),features=$('features'),editor=$('editor');
+const fileTabs=$('fileTabs'),fileCount=$('fileCount');
+const waveCanvas=$('waveCanvas'),wCtx=waveCanvas.getContext('2d');
+const waveFileName=$('waveFileName'),waveTime=$('waveTime');
+const btnPlay=$('btnPlay'),btnRew=$('btnRew'),btnStop=$('btnStop');
+const btnExport=$('btnExport'),btnExportAll=$('btnExportAll');
+const exportInfo=$('exportInfo'),infoStrip=$('infoStrip');
+const autoIndicator=$('autoIndicator');
+const progressOverlay=$('progressOverlay');
+
+// ---------- TOAST ----------
+function toast(title, body, type){
+  type = type || 'error';
+  const stack = $('toastStack');
+  const t = document.createElement('div');
+  t.className = 'toast ' + type;
+  t.innerHTML = '<div class="t-title">' + escapeHtml(title) + '</div>' + (body ? '<div class="t-body">' + escapeHtml(body) + '</div>' : '');
+  stack.appendChild(t);
+  setTimeout(function(){
+    t.style.opacity = '0';
+    t.style.transition = 'opacity .4s';
+    setTimeout(function(){ t.remove(); }, 400);
+  }, 6000);
+}
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+  });
+}
+
+function getCtx(){if(!audioCtx)audioCtx=new(window.AudioContext||window.webkitAudioContext)();return audioCtx}
+function fmtTime(s){if(!isFinite(s)||s<0)s=0;return Math.floor(s/60)+':'+String(Math.floor(s%60)).padStart(2,'0')}
+function fmtSize(b){return b<1048576?(b/1024).toFixed(1)+' KB':(b/1048576).toFixed(1)+' MB'}
+function previewRate(){return speed*Math.pow(2,pitch/12)}
+
+function showProgress(title,sub){$('progTitle').textContent=title;$('progSub').textContent=sub;$('progBarFill').style.width='0%';$('progStatus').textContent='Starting...';progressOverlay.classList.add('show')}
+function updateProgress(pct,status){$('progBarFill').style.width=pct+'%';$('progStatus').textContent=status}
+function hideProgress(){progressOverlay.classList.remove('show')}
+
+async function loadFile(file){
+  const ctx=getCtx();
+  const buf=await file.arrayBuffer();
+  const ab=await ctx.decodeAudioData(buf);
+  return{name:file.name,size:file.size,file:file,audioBuffer:ab,duration:ab.duration,previewBroken:false};
+}
+
+async function addFiles(fileList){
+  const arr = Array.from(fileList);
+  const valid = arr.filter(f =>
+    (f.type && f.type.startsWith('audio/')) ||
+    /\.(mp3|wav|ogg|flac|m4a|aac|webm|opus|wma)$/i.test(f.name)
+  );
+  const skipped = arr.length - valid.length;
+  if (skipped > 0) toast('Some files skipped', skipped + ' file(s) are not audio', 'warn');
+
+  for (const f of valid) {
+    if (f.size > MAX_FILE_SIZE) {
+      toast('File too large', f.name + ' is over 50MB and cannot be uploaded', 'error');
+      continue;
+    }
+    try {
+      files.push(await loadFile(f));
+    } catch (e) {
+      console.error('Decode failed:', f.name, e);
+      // Browser can't decode — but FFmpeg server can. Add it anyway.
+      toast(
+        'Preview unavailable: ' + f.name,
+        'Your browser cannot preview this format, but you can still try exporting it. The server uses FFmpeg which supports more formats.',
+        'warn'
+      );
+      files.push({
+        name: f.name,
+        size: f.size,
+        file: f,
+        audioBuffer: null,
+        duration: 0,
+        previewBroken: true
+      });
+    }
+  }
+
+  if (files.length) {
+    hero.style.display = 'none';
+    features.style.display = 'none';
+    editor.style.display = 'block';
+    dropzone.classList.remove('empty');
+    dropzone.classList.add('has-files');
+    dropzone.innerHTML = '<div class="sub">+ Drop more files or click to add</div>';
+  }
+  renderTabs();
+  selectFile(activeIdx);
+  updateFileCount();
+}
+
+function updateFileCount(){
+  fileCount.textContent=files.length+' FILE'+(files.length!==1?'S':'');
+  btnExportAll.style.display=files.length>1?'block':'none';
+  updateExportBtns();
+}
+
+function renderTabs(){
+  fileTabs.innerHTML='';
+  files.forEach((f,i)=>{
+    const t=document.createElement('div');
+    t.className='file-tab'+(i===activeIdx?' active':'')+(f.previewBroken?' broken':'');
+    t.style.animationDelay=(i*40)+'ms';
+    const icon = f.previewBroken ? '⚠' : '♫';
+    const dur = f.previewBroken ? '(no preview)' : fmtTime(f.duration);
+    t.innerHTML=`<span style="color:${f.previewBroken?'var(--warn)':(i===activeIdx?'var(--accent)':'var(--dim)')}">${icon}</span><span class="fname">${escapeHtml(f.name)}</span><span class="fdur">${dur}</span><button class="fclose">×</button>`;
+    t.addEventListener('click',e=>{
+      if(!e.target.classList.contains('fclose')){stopPlayback();selectFile(i)}
+    });
+    t.querySelector('.fclose').addEventListener('click',e=>{
+      e.stopPropagation();removeFile(i)
+    });
+    fileTabs.appendChild(t);
+  });
+}
+
+function removeFile(idx){
+  if(idx===activeIdx&&isPlaying)stopPlayback();
+  files.splice(idx,1);
+  if(!files.length){
+    editor.style.display='none';
+    hero.style.display='';
+    features.style.display='';
+    dropzone.classList.add('empty');
+    dropzone.classList.remove('has-files');
+    dropzone.innerHTML='<div class="icon">🎵</div><div class="title">Drop audio files here</div><div class="sub">MP3, WAV, OGG, FLAC, M4A — up to 50MB per file</div>';
+  }
+  if(activeIdx>=files.length)activeIdx=Math.max(0,files.length-1);
+  renderTabs();
+  if(files.length)selectFile(activeIdx);
+  updateFileCount();
+}
+
+function selectFile(idx){
+  activeIdx=idx;
+  renderTabs();
+  const f=files[activeIdx];
+  if(!f)return;
+  waveFileName.textContent=f.name;
+  playbackPos=0;
+  pauseOffset=0;
+  drawWaveform();
+  updateStats();
+  updateExportInfo();
+}
+
+function drawWaveform(){
+  const f=files[activeIdx];
+  const dpr=window.devicePixelRatio||1;
+  const rect=waveCanvas.getBoundingClientRect();
+  waveCanvas.width=rect.width*dpr;
+  waveCanvas.height=rect.height*dpr;
+  wCtx.scale(dpr,dpr);
+  const W=rect.width,H=rect.height;
+  wCtx.clearRect(0,0,W,H);
+  wCtx.fillStyle='#161624';
+  wCtx.fillRect(0,0,W,H);
+  if(!f)return;
+
+  // Handle files that couldn't be decoded by Web Audio — they can still be exported
+  if(f.previewBroken || !f.audioBuffer){
+    wCtx.fillStyle='#ffab40';
+    wCtx.font='600 13px JetBrains Mono, monospace';
+    wCtx.textAlign='center';
+    wCtx.fillText('⚠ Preview unavailable for this format', W/2, H/2 - 8);
+    wCtx.fillStyle='#55557a';
+    wCtx.font='11px JetBrains Mono, monospace';
+    wCtx.fillText('Export should still work via FFmpeg server', W/2, H/2 + 12);
+    waveTime.textContent = fmtSize(f.size) + ' · server-only';
+    return;
+  }
+
+  const data=f.audioBuffer.getChannelData(0);
+  const step=Math.ceil(data.length/W);
+  for(let i=0;i<W;i++){
+    let mn=1,mx=-1;
+    for(let j=0;j<step;j++){
+      const v=data[i*step+j]||0;
+      if(v<mn)mn=v;if(v>mx)mx=v;
+    }
+    const top=(1+mn)*H/2,bot=(1+mx)*H/2,bH=Math.max(bot-top,1);
+    const played=playbackPos>0&&(i/W)<playbackPos;
+    const g=wCtx.createLinearGradient(i,top,i,top+bH);
+    if(played){g.addColorStop(0,'#00e5ff');g.addColorStop(1,'#9c6cff')}
+    else{g.addColorStop(0,'#3a3a52');g.addColorStop(1,'#252540')}
+    wCtx.fillStyle=g;
+    wCtx.fillRect(i,top,2,bH);
+  }
+  if(playbackPos>0&&playbackPos<1){
+    const x=playbackPos*W;
+    wCtx.strokeStyle='#fff';
+    wCtx.lineWidth=2;
+    wCtx.shadowColor='#00e5ff';
+    wCtx.shadowBlur=8;
+    wCtx.beginPath();
+    wCtx.moveTo(x,0);
+    wCtx.lineTo(x,H);
+    wCtx.stroke();
+    wCtx.shadowBlur=0;
+  }
+  waveTime.textContent=fmtTime(f.duration*playbackPos)+' / '+fmtTime(f.duration)+' · '+fmtSize(f.size);
+}
+
+waveCanvas.addEventListener('click',e=>{
+  const f=files[activeIdx];
+  if(!f || f.previewBroken || !f.audioBuffer)return;
+  const rect=waveCanvas.getBoundingClientRect();
+  pauseOffset=((e.clientX-rect.left)/rect.width)*f.audioBuffer.duration;
+  playbackPos=pauseOffset/f.audioBuffer.duration;
+  drawWaveform();
+  if(isPlaying){stopSilent();startPlayback()}
+});
+
+function startPlayback(){
+  const f=files[activeIdx];
+  if(!f)return;
+  if(f.previewBroken || !f.audioBuffer){
+    toast('Cannot preview', 'This format is not supported by your browser. Try exporting directly — FFmpeg should handle it.', 'warn');
+    return;
+  }
+  const ctx=getCtx();
+  if(ctx.state==='suspended')ctx.resume();
+  const src=ctx.createBufferSource();
+  src.buffer=f.audioBuffer;
+  src.playbackRate.value=previewRate();
+  const gain=ctx.createGain();
+  gain.gain.value=volume;
+  gainNode=gain;
+  src.connect(gain);
+  gain.connect(ctx.destination);
+  src.start(0,pauseOffset||0);
+  startTime=ctx.currentTime-(pauseOffset||0)/previewRate();
+  sourceNode=src;
+  isPlaying=true;
+  btnPlay.textContent='⏸';
+  function tick(){
+    if(!isPlaying)return;
+    const elapsed=(ctx.currentTime-startTime)*previewRate();
+    const pos=elapsed/f.audioBuffer.duration;
+    if(pos>=1){stopPlayback();playbackPos=0;pauseOffset=0;drawWaveform();return}
+    playbackPos=pos;
+    drawWaveform();
+    raf=requestAnimationFrame(tick);
+  }
+  raf=requestAnimationFrame(tick);
+  src.onended=()=>{
+    if(sourceNode===src){stopPlayback();playbackPos=0;pauseOffset=0;drawWaveform()}
+  };
+}
+
+function stopSilent(){
+  if(sourceNode){try{sourceNode.stop()}catch(e){}sourceNode.disconnect();sourceNode=null}
+  if(raf)cancelAnimationFrame(raf);
+  isPlaying=false;
+}
+function stopPlayback(){stopSilent();btnPlay.textContent='▶'}
+function togglePlay(){
+  if(isPlaying){pauseOffset=(getCtx().currentTime-startTime)*previewRate();stopPlayback()}
+  else startPlayback();
+}
+
+function applyLive(){
+  if(sourceNode){
+    const ctx=getCtx();
+    const curOff=(ctx.currentTime-startTime)*sourceNode.playbackRate.value;
+    const nr=previewRate();
+    sourceNode.playbackRate.value=nr;
+    startTime=ctx.currentTime-curOff/nr;
+  }
+  if(gainNode)gainNode.gain.value=volume;
+  updateStats();
+  updateExportInfo();
+  highlightPreset();
+  highlightAuto();
+}
+
+function updateKnob(id,pct,color){
+  const ring=$(id);
+  ring.style.background=`conic-gradient(from -135deg, ${color} 0deg, ${color} ${pct/100*270}deg, #252538 ${pct/100*270}deg, #252538 270deg, transparent 270deg)`;
+  const needle=ring.querySelector('.knob-needle');
+  needle.style.transform=`rotate(${-135+pct/100*270}deg)`;
+  needle.style.background=color;
+  needle.style.boxShadow=`0 0 6px ${color}`;
+}
+
+function syncUI(){
+  const sPct=((speed-0.25)/3.75)*100;
+  $('sliderSpeed').value=speed;
+  $('sliderSpeedVal').textContent=speed.toFixed(2)+'x';
+  $('sliderSpeedFill').style.width=sPct+'%';
+  $('knobSpeedVal').textContent=speed.toFixed(2)+'x';
+  updateKnob('knobSpeed',sPct,'#00e5ff');
+  const pPct=((pitch+12)/24)*100;
+  $('sliderPitch').value=pitch;
+  $('sliderPitchVal').textContent=pitch+' st';
+  $('sliderPitchFill').style.width=pPct+'%';
+  $('knobPitchVal').textContent=(pitch>0?'+':'')+pitch+'st';
+  updateKnob('knobPitch',pPct,'#9c6cff');
+  const vPct=(volume/2)*100;
+  $('sliderVolume').value=volume;
+  $('sliderVolumeVal').textContent=Math.round(volume*100)+'%';
+  $('sliderVolumeFill').style.width=vPct+'%';
+  $('knobVolumeVal').textContent=Math.round(volume*100)+'%';
+  updateKnob('knobVolume',vPct,'#00e676');
+  applyLive();
+}
+
+function updateStats(){
+  const f=files[activeIdx];
+  if(!f)return;
+  $('statRate').textContent='44100Hz';
+  $('statCh').textContent='Stereo';
+  $('statOrig').textContent=f.previewBroken?'—':fmtTime(f.duration);
+  $('statProc').textContent=f.previewBroken?'—':fmtTime(f.duration/speed);
+}
+
+function updateExportInfo(){
+  const f=files[activeIdx];
+  if(!f)return;
+  const fmtInfo={mp3:'MP3 192kbps',ogg:'OGG Vorbis',wav:'WAV 16bit'};
+  exportInfo.innerHTML=`Output: ${fmtInfo[exportFormat]} · 44100Hz · Stereo<br>Speed: ${speed.toFixed(2)}x (atempo) · Pitch: ${pitch>0?'+':''}${pitch}st (asetrate) · Independent processing`;
+}
+
+function updateExportBtns(){
+  const ext=exportFormat.toUpperCase();
+  btnExport.textContent=`EXPORT CURRENT → ${ext}`;
+  if(files.length>1)btnExportAll.textContent=`EXPORT ALL ${files.length} FILES → ${ext}`;
+}
+
+$('sliderSpeed').addEventListener('input',e=>{speed=parseFloat(e.target.value);activeAutoMode=null;syncUI()});
+$('sliderPitch').addEventListener('input',e=>{pitch=parseInt(e.target.value);activeAutoMode=null;syncUI()});
+$('sliderVolume').addEventListener('input',e=>{volume=parseFloat(e.target.value);syncUI()});
+
+function setupKnob(knobId,param,min,max,stepSize){
+  const el=$(knobId);
+  let dragging=false,sy=0,sv=0;
+  el.addEventListener('pointerdown',e=>{
+    dragging=true;sy=e.clientY;
+    sv=param==='speed'?speed:param==='pitch'?pitch:volume;
+    el.setPointerCapture(e.pointerId);
+  });
+  el.addEventListener('pointermove',e=>{
+    if(!dragging)return;
+    let nv=sv+((sy-e.clientY)/150)*(max-min);
+    nv=Math.round(nv/stepSize)*stepSize;
+    nv=Math.max(min,Math.min(max,nv));
+    if(param==='speed'){speed=nv;activeAutoMode=null}
+    else if(param==='pitch'){pitch=nv;activeAutoMode=null}
+    else volume=nv;
+    syncUI();
+  });
+  el.addEventListener('pointerup',()=>dragging=false);
+  el.addEventListener('pointercancel',()=>dragging=false);
+}
+setupKnob('knobSpeed','speed',0.25,4.0,0.05);
+setupKnob('knobPitch','pitch',-12,12,1);
+setupKnob('knobVolume','volume',0,2.0,0.05);
+
+(function(){
+  const c=$('autoModes');
+  autoModes.forEach(m=>{
+    const b=document.createElement('button');
+    b.className='auto-btn'+(m.featured?' auto-featured':'');
+    b.dataset.id=m.id;
+    b.innerHTML=`${m.label}<div class="detail">${m.desc}</div>`;
+    b.addEventListener('click',()=>{
+      if(activeAutoMode===m.id){activeAutoMode=null;speed=1.0;pitch=0}
+      else{activeAutoMode=m.id;speed=m.speed;pitch=m.pitch}
+      syncUI();
+    });
+    c.appendChild(b);
+  });
+})();
+
+function highlightAuto(){
+  document.querySelectorAll('.auto-btn').forEach(b=>b.classList.toggle('active',b.dataset.id===activeAutoMode));
+  const on=activeAutoMode!==null;
+  autoIndicator.style.display=on?'block':'none';
+  const s=$('autoSection');
+  s.classList.toggle('auto-active-glow',on);
+  s.style.borderColor=on?'rgba(255,171,64,.3)':'';
+  s.style.background=on?'rgba(255,171,64,.04)':'';
+}
+
+(function(){
+  presets.forEach(p=>{
+    const b=document.createElement('button');
+    b.className='preset-btn';
+    b.dataset.speed=p.speed;
+    b.dataset.pitch=p.pitch;
+    b.innerHTML=`${p.label}<div class="preset-detail">${p.speed}x / ${p.pitch>0?'+':''}${p.pitch}st</div>`;
+    b.addEventListener('click',()=>{speed=p.speed;pitch=p.pitch;activeAutoMode=null;syncUI()});
+    $('presetsGrid').appendChild(b);
+  });
+})();
+
+function highlightPreset(){
+  document.querySelectorAll('.preset-btn').forEach(b=>b.classList.toggle('active',Math.abs(speed-parseFloat(b.dataset.speed))<0.01&&pitch===parseInt(b.dataset.pitch)));
+}
+
+(function(){
+  const c=$('formatSelector');
+  formats.forEach(f=>{
+    const b=document.createElement('button');
+    b.className='format-btn'+(f.id===exportFormat?' active':'');
+    b.dataset.fmt=f.id;
+    b.innerHTML=`${f.label}<div class="fmt-sub">${f.sub}</div>`;
+    b.addEventListener('click',()=>{
+      exportFormat=f.id;
+      document.querySelectorAll('.format-btn').forEach(x=>x.classList.toggle('active',x.dataset.fmt===f.id));
+      updateExportBtns();
+      updateExportInfo();
+    });
+    c.appendChild(b);
+  });
+})();
+
+btnPlay.addEventListener('click',togglePlay);
+btnRew.addEventListener('click',()=>{
+  if(isPlaying)stopPlayback();
+  pauseOffset=0;playbackPos=0;
+  drawWaveform();
+});
+btnStop.addEventListener('click',()=>{
+  stopPlayback();
+  pauseOffset=0;playbackPos=0;
+  drawWaveform();
+});
+
+dropzone.addEventListener('dragover',e=>{e.preventDefault();dropzone.classList.add('dragover')});
+dropzone.addEventListener('dragleave',()=>dropzone.classList.remove('dragover'));
+dropzone.addEventListener('drop',e=>{
+  e.preventDefault();
+  dropzone.classList.remove('dragover');
+  addFiles(e.dataTransfer.files);
+});
+dropzone.addEventListener('click',()=>fileInput.click());
+fileInput.addEventListener('change',e=>{addFiles(e.target.files);e.target.value=''});
+
+async function serverExport(fileData){
+  const formData=new FormData();
+  formData.append('audio',fileData.file);
+  formData.append('speed',speed);
+  formData.append('pitch',pitch);
+  formData.append('volume',volume);
+  formData.append('format',exportFormat);
+
+  let resp;
+  try {
+    resp = await fetch('/api/process',{method:'POST',body:formData});
+  } catch (netErr) {
+    throw new Error('Network error — check your connection and try again');
+  }
+
+  let data;
+  try {
+    data = await resp.json();
+  } catch (e) {
+    throw new Error('Server returned an invalid response (status ' + resp.status + ')');
+  }
+
+  if (!resp.ok || !data.success) {
+    throw new Error(data.error || 'Server error (status ' + resp.status + ')');
+  }
+  return data;
+}
+
+function triggerDownload(url, filename){
+  const a=document.createElement('a');
+  a.href=url+'?name='+encodeURIComponent(filename);
+  a.download=filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(()=>{ try{ a.remove(); }catch(e){} }, 500);
+}
+
+btnExport.addEventListener('click',async()=>{
+  const f=files[activeIdx];
+  if(!f)return;
+  const ext=exportFormat.toUpperCase();
+  btnExport.disabled=true;
+  showProgress(`Processing → ${ext}`,`FFmpeg: speed ${speed}x, pitch ${pitch>0?'+':''}${pitch}st`);
+  updateProgress(30,'Uploading to server...');
+  try {
+    updateProgress(60,'FFmpeg encoding...');
+    const result=await serverExport(f);
+    updateProgress(90,'Downloading...');
+    triggerDownload(result.downloadUrl, result.filename);
+    updateProgress(100,'Done!');
+    setTimeout(hideProgress,800);
+    toast('Export complete', result.filename, 'success');
+  } catch(e) {
+    console.error('Export fail:',e);
+    hideProgress();
+    toast('Export failed', e.message || 'Unknown error', 'error');
+  }
+  btnExport.disabled=false;
+  updateExportBtns();
+});
+
+btnExportAll.addEventListener('click',async()=>{
+  btnExportAll.disabled=true;
+  const ext=exportFormat.toUpperCase();
+  showProgress(`Bulk Export → ${ext}`,`Processing ${files.length} files...`);
+  let successCount=0, failCount=0;
+  for(let i=0;i<files.length;i++){
+    updateProgress((i/files.length)*100,`Processing ${i+1}/${files.length}: ${files[i].name}`);
+    try {
+      const result=await serverExport(files[i]);
+      triggerDownload(result.downloadUrl, result.filename);
+      successCount++;
+      await new Promise(r=>setTimeout(r,800));
+    } catch(e) {
+      console.error('Export fail:',files[i].name,e);
+      failCount++;
+      toast('Failed: ' + files[i].name, e.message || 'Unknown error', 'error');
+    }
+  }
+  updateProgress(100,`Done! ${successCount} succeeded, ${failCount} failed`);
+  setTimeout(hideProgress,1200);
+  if(successCount>0) toast('Bulk export done', `${successCount} file(s) exported`, 'success');
+  btnExportAll.disabled=false;
+  updateExportBtns();
+});
+
+window.addEventListener('resize',()=>{if(files.length)drawWaveform()});
+
+fetch('/api/health').then(r=>r.json()).then(d=>{
+  $('serverBadge').textContent=d.ffmpeg?'⚡ FFmpeg Online':'⚠ FFmpeg Missing';
+}).catch(()=>{
+  $('serverBadge').textContent='⚠ Server Offline';
+  $('serverBadge').style.color='var(--danger)';
+  $('serverBadge').style.borderColor='rgba(255,82,82,.3)';
+});
+
+syncUI();
+})();
 </script>
 </body>
 </html>
